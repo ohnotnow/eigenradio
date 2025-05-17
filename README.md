@@ -52,9 +52,11 @@ uv run main.py --icecast-file path/to/icecast.xml
 You can grab a decent icecast xml file from `https://dir.xiph.org/yp.xml`.
 
 Optional flags:
+```
   --static-file \<file\>   Path to static‐noise MP3 (default: `static.mp3`)
   --playtime \<secs\>      Seconds to play each stream before crossfade (default: 600)
   --fade \<secs\>          Duration of fade‐in/out phases (default: 3)
+```
 
 Examples:
 ```
