@@ -64,9 +64,9 @@ def get_random_station(stations, max_attempts=10):
         attempts += 1
     raise Exception("No working stations found after multiple attempts.")
 
-def play_stream(url):
+def play_stream(url, initial_volume=100):
     player = vlc.MediaPlayer(url)
-    player.audio_set_volume(100)
+    player.audio_set_volume(initial_volume)
     player.play()
     time.sleep(1)  # let it buffer/play
     return player
@@ -106,8 +106,7 @@ def crossfade(old_player, new_url, static_file, static_last_pos=0, fade_time=3, 
     static_player = play_static(static_file, start_ms=static_start)
 
     # New stream
-    new_player = play_stream(new_url)
-    new_player.audio_set_volume(0)
+    new_player = play_stream(new_url, initial_volume=0)
     steps = 20
 
     # PHASE 1: Fade out old, fade in static
