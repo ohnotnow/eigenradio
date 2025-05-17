@@ -5,6 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "miniaudio>=1.61",
+    "numpy>=2.2.5",
     "python-vlc>=3.0.21203",
     "requests>=2.32.3",
 ]
