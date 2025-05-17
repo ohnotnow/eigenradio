@@ -74,6 +74,7 @@ def play_stream(url, initial_volume=100):
 def play_static(static_file, start_ms=None):
     player = vlc.MediaPlayer(static_file)
     player.audio_set_volume(0)
+    time.sleep(0.2)
     player.play()
     time.sleep(0.2)
     if start_ms is not None:
