@@ -2,6 +2,8 @@
 
 A command-line Internet radio player written in Python. Eigenradio parses M3U or Icecast XML playlists, randomly selects a working stream, plays it via VLC, and crossfades between stations with static-noise filler as a faux 'retune the radio'.
 
+Named in memory of the MIT 'Eigenradio' site from years gone past.
+
 ## Features
 - Supports M3U (`.m3u`) playlists and Icecast XML files
 - Random station selection with automatic health checks
@@ -75,5 +77,3 @@ uv run main.py --icecast-file icecast.xml --playtime=20
 ## License
 
 This project is licensed under the MIT License.  See [LICENSE](LICENSE) for details.
-
-
