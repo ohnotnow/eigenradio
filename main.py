@@ -72,11 +72,13 @@ def play_stream(url, initial_volume=100):
     return player
 
 def play_static(static_file, start_ms=None):
+    # TODO: one day the VLC API will have a way to set the volume to zero before *any* playback,
+    # but for now we can just leave this hack in place.  VLC (apparently) pre-buffers a little of the media at a set
+    # volume, and it'll play that before a call to set the volume to zero :-(
     player = vlc.MediaPlayer(static_file)
     player.audio_set_volume(0)
     time.sleep(0.2)
     player.play()
-    time.sleep(0.2)
     if start_ms is not None:
         player.set_time(start_ms)
     return player
