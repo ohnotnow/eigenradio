@@ -6,9 +6,14 @@ import random
 import requests
 import xml.etree.ElementTree as ET
 import time
+import json
+import os
 from typing import List, Optional, Set, Dict
 
 from config import debug
+
+# File to store station stats
+STATS_FILE = "station_stats.json"
 
 # Cache for checked stations
 checked_stations = {}
@@ -22,6 +27,27 @@ consecutive_failures: Set[str] = set()
 station_stats: Dict[str, Dict] = {}
 # Maximum consecutive failures before we reset our exclusion list
 MAX_CONSECUTIVE_FAILURES = 10
+
+def load_stats_from_disk():
+    """Load station stats from disk"""
+    global station_stats
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE, 'r', encoding='utf-8') as f:
+                station_stats = json.load(f)
+            debug(f"Loaded stats for {len(station_stats)} stations from {STATS_FILE}")
+        except (json.JSONDecodeError, IOError) as e:
+            debug(f"Error loading stats file: {str(e)}")
+            station_stats = {}
+
+def save_stats_to_disk():
+    """Save station stats to disk"""
+    try:
+        with open(STATS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(station_stats, f, indent=2)
+        debug(f"Saved stats for {len(station_stats)} stations to {STATS_FILE}")
+    except IOError as e:
+        debug(f"Error saving stats file: {str(e)}")
 
 def parse_m3u(file_path: str) -> List[str]:
     """Parse an M3U file and return a list of stream URLs"""
@@ -137,6 +163,10 @@ def update_station_stats(url: str, success: bool):
         stats['last_failure'] = time.time()
         # Add to consecutive failures
         consecutive_failures.add(url)
+
+    # Save stats periodically (every 5 updates to avoid constant disk writes)
+    if stats['attempts'] % 5 == 0:
+        save_stats_to_disk()
 
 def get_station_score(url: str) -> float:
     """
@@ -259,3 +289,6 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
         return random.choice(stations)
 
     raise Exception(f"No working stations found after {attempts} attempts")
+
+# Load stats when module is imported
+load_stats_from_disk()
