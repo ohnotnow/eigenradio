@@ -48,7 +48,7 @@ or
 uv run main.py --icecast-file path/to/icecast.xml
 ```
 
-You can grab a decent icecast xml file from `https://dir.xiph.org/yp.xml` or find lots of links on sites like [InternetRadio](https://www.internet-radio.com/) or [StreamURL](https://streamurl.link/).
+You can grab a decent icecast xml file from `https://dir.xiph.org/yp.xml` or find lots of links on sites like [InternetRadio](https://www.internet-radio.com/) or [StreamURL](https://streamurl.link/).  There is an example m3u file in the repo (`example.m3u` to get started - though stations go out of date quickly).
 
 Optional flags:
 ```
