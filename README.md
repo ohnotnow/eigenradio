@@ -1,6 +1,6 @@
 # Eigenradio
 
-A command-line Internet radio player written in Python. Eigenradio parses M3U or Icecast XML playlists, randomly selects a working stream, plays it via VLC, and crossfades between stations with static-noise filler as a faux 'retune the radio'.
+A command-line Internet radio player written in Python. Eigenradio parses M3U or Icecast XML playlists, randomly selects a working stream and crossfades between stations with static-noise filler as a faux 'retune the radio'.
 
 Named in memory of the MIT 'Eigenradio' site from years gone past.
 
@@ -9,15 +9,12 @@ Named in memory of the MIT 'Eigenradio' site from years gone past.
 - Random station selection with automatic health checks
 - Crossfades between streams using a static‐noise track
 - Configurable play duration and fade times
-- Pure‐Python implementation leveraging `python-vlc` and `requests`
+- Pure‐Python implementation leveraging `miniaudio` and `requests`
 
 ## Requirements
 - Python 3.x (tested on 3.8+)
-- VLC media player (with libVLC bindings)
 - [`uv`](https://docs.astral.sh/uv/) (modern Python dependency runner)
 - A valid static‐noise file (`static.mp3` by default)
-
-The Python dependencies (`python-vlc`, `requests`) are installed via `uv sync`.
 
 ## Installation
 
@@ -51,13 +48,13 @@ or
 uv run main.py --icecast-file path/to/icecast.xml
 ```
 
-You can grab a decent icecast xml file from `https://dir.xiph.org/yp.xml`.
+You can grab a decent icecast xml file from `https://dir.xiph.org/yp.xml` or find lots of links on sites like [InternetRadio](https://www.internet-radio.com/) or [StreamURL](https://streamurl.link/).
 
 Optional flags:
 ```
-  --static-file \<file\>   Path to static‐noise MP3 (default: `static.mp3`)
-  --playtime \<secs\>      Seconds to play each stream before crossfade (default: 600)
-  --fade \<secs\>          Duration of fade‐in/out phases (default: 3)
+  --static-file <file>   Path to static‐noise MP3 (default: `static.mp3`)
+  --playtime <secs>      Seconds to play each stream before crossfade (default: 600)
+  --fade <secs>          Duration of fade‐in/out phases (default: 3)
 ```
 
 Examples:
