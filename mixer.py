@@ -233,7 +233,6 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                 # or schedule it for later for regular switches
                 if fade_phase is None:  # Not an emergency case
                     scheduled_switch_time = time.time()
-                    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Will switch shortly")
                 else:
                     # Emergency case - start fade-in immediately if we were in hold
                     if fade_phase == 'hold':
