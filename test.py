@@ -13,11 +13,19 @@ import time, random, array, re, urllib.parse as up, requests
 from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Optional
 from datetime import datetime
+import os, sys
 import miniaudio as ma
 import numpy as np
 import threading, queue
+import argparse
+import xml.etree.ElementTree as ET
+import requests
+import logging
+logging.basicConfig(level=logging.INFO)
+checked_stations = {}
 
 # ---------------------------------------------------------------------------
+DEBUG = False
 RATE            = 44_100     # Hz
 CHANNELS        = 2
 FRAME_SIZE      = 1_024      # sound-card callback size
@@ -47,6 +55,62 @@ class SmoothIceCast(ma.IceCastClient):
 # ─────────────────────────── helpers ────────────────────────────────────────
 PLAYLIST_RE = re.compile(r'^\s*File\d+\s*=\s*(http.*)', re.I)
 FRAME_QUEUE = queue.Queue(maxsize=100)          # ≤ ~2½ s of audio
+
+def _debug(message):
+    if DEBUG:
+        logging.info(message)
+
+def parse_m3u(file_path):
+    stations = []
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                stations.append(line)
+    return stations
+
+def parse_icecast(file_path):
+    tree = ET.parse(file_path)
+    root = tree.getroot()
+    stations = [
+        elem.text.strip()
+        for elem in root.iter('listen_url')
+        if elem.text and elem.text.strip()
+    ]
+    return stations
+
+def check_station_url(url, timeout=5):
+    if url in checked_stations:
+        return checked_stations[url]
+    try:
+        response = requests.head(url, allow_redirects=True, timeout=timeout)
+        if response.status_code == 200:
+            checked_stations[url] = True
+            return True
+        # fallback to GET if HEAD fails
+        response = requests.get(url, stream=True, timeout=timeout)
+        if response.status_code == 200:
+            next(response.iter_content(1024), None)
+            checked_stations[url] = True
+            return True
+    except Exception:
+        pass
+    checked_stations[url] = False
+    return False
+
+def get_random_station(stations, max_attempts=10):
+    _debug(f"Getting random station from {len(stations)} stations")
+    tried = set()
+    attempts = 0
+    while attempts < max_attempts and len(tried) < len(stations):
+        url = random.choice(stations)
+        if url in tried:
+            continue
+        tried.add(url)
+        if check_station_url(url):
+            return url
+        attempts += 1
+    raise Exception("No working stations found after multiple attempts.")
 
 # ─────────── producer (runs in its own thread) ───────────
 def produce_pcm(gen):
@@ -169,14 +233,14 @@ def open_stream(url: str):
     return icecast_stream(url)
 
 # ─────────────────────────── core mixer ─────────────────────────────────────
-def radio_mixer(stations, static_pcm):
+def radio_mixer(stations, static_pcm, playtime = 600, fade = 3):
     required = yield b''                     # priming handshake
 
-    current_url = random.choice(stations)
+    current_url = get_random_station(stations)
     current     = icecast_stream(current_url)
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Now playing →", current_url)
 
-    next_switch  = time.time() + PLAY_SEC
+    next_switch  = time.time() + playtime
     fade_phase   = None                      # None/out/hold/in
     fade_pos     = 0
     static_pos   = random.randrange(len(static_pcm)//CHANNELS)
@@ -193,8 +257,8 @@ def radio_mixer(stations, static_pcm):
             samples[:] = read_frames(current, required)
 
         else:                                # some phase of the X-fade
-            t1   = fade_pos / (FADE_SEC * RATE)
-            t2   = (fade_pos + required) / (FADE_SEC * RATE)
+            t1   = fade_pos / (fade * RATE)
+            t2   = (fade_pos + required) / (fade * RATE)
             ramp = np.repeat(np.linspace(t1, t2, required, dtype=np.float32),
                               CHANNELS)
 
@@ -205,7 +269,7 @@ def radio_mixer(stations, static_pcm):
                 samples[:] = ((1 - ramp) * dry + ramp * wet).astype(np.int16)
                 fade_pos  += required
                 static_pos = (static_pos + required) % (len(static_pcm)//CHANNELS)
-                if fade_pos >= FADE_SEC*RATE:
+                if fade_pos >= fade*RATE:
                     fade_phase, fade_pos = 'hold', 0
 
             elif fade_phase == 'hold':       # static full
@@ -221,7 +285,7 @@ def radio_mixer(stations, static_pcm):
                         prefetch_job = None
                         current_url  = target_url
                         fade_phase, fade_pos = 'in', 0
-                        next_switch  = time.time() + PLAY_SEC
+                        next_switch  = time.time() + playtime
                         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Now playing →", current_url)
                     except Exception as e:
                         print("Stream failed:", e)
@@ -235,15 +299,15 @@ def radio_mixer(stations, static_pcm):
                 samples[:] = ((1 - ramp) * dry + ramp * wet).astype(np.int16)
                 fade_pos  += required
                 static_pos = (static_pos + required) % (len(static_pcm)//CHANNELS)
-                if fade_pos >= FADE_SEC*RATE:
+                if fade_pos >= fade*RATE:
                     current      = next_stream
-                    next_switch  = time.time() + PLAY_SEC
+                    next_switch  = time.time() + playtime
                     fade_phase   = None
 
         # ───── launch prefetch just *before* we need it ────────────────────
         if (fade_phase is None and
                 prefetch_job is None and
-                time.time() >= next_switch - (FADE_SEC + HOLD_SEC)):
+                time.time() >= next_switch - (fade + HOLD_SEC)):
             target_url   = random.choice([s for s in stations if s != current_url])
             prefetch_job = executor.submit(open_stream, target_url)
             fade_phase, fade_pos = 'out', 0
@@ -257,22 +321,33 @@ def radio_mixer(stations, static_pcm):
 
 # ─────────────────────────── bootstrap ──────────────────────────────────────
 # ─────────────────────────── bootstrap ──────────────────────────────────────
-def main(m3u_path: str, static_path: str):
-    # 1) read the list of station URLs from the .m3u or .pls file
-    with open(m3u_path, encoding='utf-8') as f:
-        stations = [l.strip() for l in f
-                    if l.strip() and not l.startswith('#')]
-    if not stations:
-        raise SystemExit("No stations in playlist!")
+def main(args):
+    if args.m3u_file:
+        stations = parse_m3u(args.m3u_file)
+    else:
+        stations = parse_icecast(args.icecast_file)
 
-    # 2) decode the local “static” noise file into PCM once at startup
-    static_pcm = ma.decode_file(static_path,
+    static_file = args.static_file
+    if not os.path.isfile(static_file):
+        print(f"No static file found at {static_file}!")
+        sys.exit(1)
+
+    if not stations:
+        if args.m3u_file:
+            print("No stations found in M3U file!")
+        else:
+            print("No stations found in Icecast file!")
+        sys.exit(1)
+
+    print(f"Loaded {len(stations)} stations and static sound: {static_file}")
+
+    static_pcm = ma.decode_file(static_file,
                                 output_format=ma.SampleFormat.SIGNED16,
                                 nchannels=CHANNELS,
                                 sample_rate=RATE).samples   # array('h')
 
     # 3) spin up the mixing coroutine and the producer thread
-    mixer = radio_mixer(stations, static_pcm)
+    mixer = radio_mixer(stations, static_pcm, args.playtime, args.fade)
     next(mixer)  # prime coroutine
 
     threading.Thread(target=produce_pcm,
@@ -296,8 +371,15 @@ def main(m3u_path: str, static_path: str):
 
 
 if __name__ == '__main__':
-    import sys
-    if len(sys.argv) != 3:
-        print("Usage: python test.py <playlist.m3u> <static.mp3>")
-        sys.exit(1)
-    main(sys.argv[1], sys.argv[2])
+    parser = argparse.ArgumentParser(description="Stream radio player")
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument("--m3u-file", type=str, help="Path to the M3U file")
+    source_group.add_argument("--icecast-file", type=str, help="Path to the icecast file")
+    parser.add_argument("--static-file", type=str, default="static.mp3", help="Path to the concatenated static file")
+    parser.add_argument("--playtime", type=int, default=600, help="Play time in seconds")
+    parser.add_argument("--fade", type=int, default=3, help="Fade time in seconds")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args()
+    if args.debug:
+        DEBUG = True
+    main(args)
