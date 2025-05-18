@@ -25,16 +25,29 @@ from mixer import radio_mixer
 
 # Global flag for clean shutdown
 running = True
+# Force exit flag
+force_exit = False
+# Counter for SIGINT signals
+sigint_count = 0
 
 def signal_handler(sig, frame):
     """Handle interrupt signals for clean shutdown"""
-    global running
-    print("\nShutting down gracefully... (Ctrl-C again to force quit)")
-    running = False
+    global running, force_exit, sigint_count
+
+    sigint_count += 1
+
+    if sigint_count == 1:
+        print("\nShutting down gracefully... (Ctrl-C again to force quit)")
+        running = False
+    elif sigint_count >= 2:
+        print("\nForce quitting...")
+        force_exit = True
+        # Force exit after a short delay to allow message to be printed
+        os._exit(0)
 
 def main(args):
     """Main function to start the radio player"""
-    global running
+    global running, force_exit
 
     # Register signal handler for clean shutdown
     signal.signal(signal.SIGINT, signal_handler)
@@ -79,29 +92,36 @@ def main(args):
     player = radio_player()
     next(player)  # prime coroutine
 
-    with ma.PlaybackDevice(sample_rate=44100,
+    # Setup playback device
+    dev = ma.PlaybackDevice(sample_rate=44100,
                            nchannels=2,
                            output_format=ma.SampleFormat.SIGNED16,
-                           buffersize_msec=120) as dev:
+                           buffersize_msec=120)
+    try:
         dev.start(player)
         print("▲  Playing…  Ctrl-C to quit")
 
         # Main loop with clean shutdown
+        while running and not force_exit:
+            time.sleep(0.1)
+
+        # Graceful shutdown
+        print("Shutting down...")
+        time.sleep(0.5)  # Allow final audio to play
+
+    except KeyboardInterrupt:
+        # Handle any KeyboardInterrupt that wasn't caught by the signal handler
+        print("\nForce quitting...")
+
+    finally:
+        # Ensure resources are cleaned up
         try:
-            while running:
-                time.sleep(0.5)
-
-            # Graceful shutdown
-            print("Shutting down...")
-            time.sleep(1)  # Allow final audio to play
-
-        except KeyboardInterrupt:
-            # Force shutdown on second Ctrl-C
-            print("\nForce quitting...")
-
-        finally:
-            # Ensure everything is cleaned up
-            print("Goodbye!")
+            dev.close()
+        except:
+            pass
+        print("Goodbye!")
+        # Make sure we exit
+        sys.exit(0)
 
 
 if __name__ == '__main__':
