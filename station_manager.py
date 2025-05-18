@@ -9,6 +9,7 @@ import time
 import json
 import os
 from typing import List, Optional, Set, Dict, Tuple
+import concurrent.futures
 
 from config import debug
 
@@ -33,14 +34,14 @@ MAX_CONSECUTIVE_FAILURES = 10
 # Track recently played stations in this session
 # Format: (url, timestamp)
 recent_play_history: List[Tuple[str, float]] = []
-# Maximum play history to maintain
-MAX_PLAY_HISTORY = 15
+# Maximum play history to maintain - increased to track more stations
+MAX_PLAY_HISTORY = 50
 # How much to penalize recently played stations (higher = stronger preference for fresh stations)
-# Increased from 0.3 to 0.7 to make the penalty more influential
-RECENT_PLAY_PENALTY = 0.7
+# Set to maximum penalty of 1.0 to strongly discourage repeats
+RECENT_PLAY_PENALTY = 1.0
 # Time window where the recency penalty gradually decreases (in seconds)
-# Increased from 1 hour to 3 hours to extend the penalty duration
-RECENCY_WINDOW = 10800  # 3 hours
+# Increased significantly to extend the penalty duration - now 24 hours
+RECENCY_WINDOW = 86400  # 24 hours
 # Minimum number of stations to try in each selection round
 MIN_SELECTION_CANDIDATES = 5
 
@@ -58,12 +59,13 @@ def load_stats_from_disk():
 
 def save_stats_to_disk():
     """Save station stats to disk"""
+    print(f"Saving stats for {len(station_stats)} stations to {STATS_FILE}")
     try:
         with open(STATS_FILE, 'w', encoding='utf-8') as f:
             json.dump(station_stats, f, indent=2)
-        debug(f"Saved stats for {len(station_stats)} stations to {STATS_FILE}")
+        print(f"Saved stats for {len(station_stats)} stations to {STATS_FILE}")
     except IOError as e:
-        debug(f"Error saving stats file: {str(e)}")
+        print(f"Error saving stats file: {str(e)}")
 
 def parse_m3u(file_path: str) -> List[str]:
     """Parse an M3U file and return a list of stream URLs"""
@@ -332,50 +334,44 @@ def clean_failed_stations():
         debug(f"Too many consecutive failures ({len(consecutive_failures)}), resetting exclusion list")
         consecutive_failures.clear()
 
-def verify_previously_working_stations(stations: List[str]) -> List[str]:
+def verify_previously_working_stations_async(stations: List[str], executor=None) -> concurrent.futures.Future:
     """
-    Check if stations that were previously working are still working.
-    Returns a list of stations that are verified to be working now.
+    Asynchronously check if stations that were previously working are still working.
+    Returns a Future that will resolve to a list of stations that are verified to be working now.
 
     Args:
         stations: List of station URLs to verify
+        executor: ThreadPoolExecutor to use for async execution
 
     Returns:
-        List of working stations
+        Future[List[str]]
     """
-    working_stations = []
+    if executor is None:
+        raise ValueError("An executor must be provided for async verification.")
 
-    # First, look at recent play history for stations that worked recently
-    recently_played = [url for url, _ in recent_play_history]
-
-    # For stations that played successfully in this session, reset their cache
-    # and re-check them first
-    for url in recently_played:
-        if url in stations:
-            # Force a fresh check of this previously working station
+    def check():
+        working_stations = []
+        recently_played = [url for url, _ in recent_play_history]
+        for url in recently_played:
+            if url in stations:
+                reset_station_cache(url)
+                if check_station_url(url, force_check=True):
+                    working_stations.append(url)
+        if len(working_stations) >= 2:
+            return working_stations
+        remaining = [s for s in stations if s not in working_stations]
+        random.shuffle(remaining)
+        for url in remaining[:5]:
             reset_station_cache(url)
             if check_station_url(url, force_check=True):
                 working_stations.append(url)
-
-    # If we found at least a couple working stations, return those
-    if len(working_stations) >= 2:
         return working_stations
-
-    # Otherwise, check a random sample of other stations
-    remaining = [s for s in stations if s not in working_stations]
-    random.shuffle(remaining)
-
-    # Try up to 5 more stations
-    for url in remaining[:5]:
-        reset_station_cache(url)
-        if check_station_url(url, force_check=True):
-            working_stations.append(url)
-
-    return working_stations
+    return executor.submit(check)
 
 def select_diverse_station(available_stations: List[str], exclude: Optional[str] = None):
     """
     Select a station with emphasis on diversity - tries to avoid recently played stations
+    with strong preference for stations that haven't been played at all
     """
     if not available_stations:
         return None
@@ -385,6 +381,32 @@ def select_diverse_station(available_stations: List[str], exclude: Optional[str]
     if not candidates:
         return None
 
+    # First, check for stations that have NEVER been played in this session
+    # These get absolute priority to maximize diversity
+    never_played = []
+    for station in candidates:
+        if get_play_count_in_history(station) == 0:
+            never_played.append(station)
+
+    # If we found stations that have never been played, prioritize those
+    # and only consider them for selection
+    if never_played:
+        debug(f"Found {len(never_played)} stations that have never been played")
+        # Only score these never-played stations
+        scored_candidates = [(url, get_station_score(url)) for url in never_played]
+        # Sort by score, highest first
+        scored_candidates.sort(key=lambda x: x[1], reverse=True)
+
+        # Show debug info
+        debug(f"Selecting from {len(never_played)} never-played stations")
+        for url, score in scored_candidates[:5]:  # Show top 5 for brevity
+            debug(f"  {url}: score={score:.2f}")
+
+        # Return the highest-scoring never-played station
+        if scored_candidates:
+            return scored_candidates[0][0]
+
+    # If no never-played stations, continue with standard approach
     # Group stations by how many times they've appeared in history
     play_counts = {}
     for station in candidates:
@@ -413,7 +435,7 @@ def select_diverse_station(available_stations: List[str], exclude: Optional[str]
 
     return random.choice(candidates)  # Fallback
 
-def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[str] = None) -> str:
+def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[str] = None, executor=None) -> str:
     """
     Get a random working station from the list, with preference for stations
     that haven't been played recently.
@@ -422,6 +444,7 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
         stations: List of station URLs
         max_attempts: Maximum number of attempts to find a working station
         exclude: URL to exclude (typically the current station)
+        executor: ThreadPoolExecutor to use for async verification
 
     Returns:
         A working station URL
@@ -435,9 +458,32 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
     tried = set()
     attempts = 0
 
+    # Create a blacklist of recently played stations to enforce diversity
+    # Get the timestamps for recently played stations
+    current_time = time.time()
+    recent_blacklist = set()
+
+    # Get all stations played in the last 60 minutes (strict blacklist)
+    STRICT_BLACKLIST_WINDOW = 60 * 60  # 1 hour
+    for station_url, timestamp in recent_play_history:
+        time_since_played = current_time - timestamp
+        if time_since_played < STRICT_BLACKLIST_WINDOW:
+            recent_blacklist.add(station_url)
+            debug(f"Station {station_url} blacklisted (played {time_since_played:.0f} seconds ago)")
+
+    # If we have enough stations, filter out all recently played ones
+    if len(stations) - len(recent_blacklist) > 3:
+        debug(f"Filtering out {len(recent_blacklist)} recently played stations")
+        filtered_stations = [s for s in stations if s not in recent_blacklist]
+    else:
+        # If filtering would leave too few stations, just continue with all
+        filtered_stations = stations
+        debug(f"Not enough stations to filter ({len(stations)} total, {len(recent_blacklist)} played recently)")
+
     # Before randomly trying stations, let's verify if any previously working ones
-    # are still available
-    working_stations = verify_previously_working_stations(stations)
+    # are still available (using our filtered list)
+    working_stations_future = verify_previously_working_stations_async(filtered_stations, executor)
+    working_stations = working_stations_future.result() if executor else []
     if working_stations and exclude in working_stations:
         working_stations.remove(exclude)
 
@@ -449,8 +495,8 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
             debug(f"Selected verified working station: {diverse_pick}")
             return diverse_pick
 
-    # Filter out excluded station
-    available_stations = [s for s in stations if s != exclude]
+    # Filter out excluded station from our already filtered list
+    available_stations = [s for s in filtered_stations if s != exclude]
     if not available_stations and exclude and check_station_url(exclude):
         # If all other stations are unavailable, reuse the current one
         debug("No alternative stations available, reusing current")
