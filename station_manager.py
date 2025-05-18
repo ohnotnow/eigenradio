@@ -86,8 +86,41 @@ def parse_icecast(file_path: str) -> List[str]:
     ]
     return stations
 
-def check_station_url(url: str, timeout=5) -> bool:
+def reset_station_cache(url: Optional[str] = None):
+    """
+    Reset the station check cache, either for a specific URL or all URLs.
+    This forces the system to re-check a station even if it was previously checked.
+
+    Args:
+        url: Optional URL to reset. If None, reset all station caches.
+    """
+    global checked_stations, failed_stations
+
+    if url is None:
+        # Reset all station caches
+        debug("Resetting all station caches")
+        checked_stations.clear()
+        failed_stations.clear()
+    elif url in checked_stations:
+        # Reset just this URL
+        debug(f"Resetting cache for {url}")
+        del checked_stations[url]
+        if url in failed_stations:
+            del failed_stations[url]
+
+    # Also clean up any stale entries in consecutive_failures
+    for failure_url in list(consecutive_failures):
+        if not any((station_url == failure_url for station_url, _ in recent_play_history)):
+            consecutive_failures.discard(failure_url)
+
+def check_station_url(url: str, timeout=5, force_check=False) -> bool:
     """Check if a station URL is responsive and working"""
+    # If force check requested, clear the cache for this URL
+    if force_check and url in checked_stations:
+        del checked_stations[url]
+        if url in failed_stations:
+            del failed_stations[url]
+
     # Check if this station has exceeded maximum allowed failures (permanent blacklist)
     if url in station_stats and station_stats[url]['failures'] >= MAX_ALLOWED_FAILURES:
         debug(f"Skipping permanently blacklisted station (failed {station_stats[url]['failures']} times): {url}")
@@ -202,6 +235,15 @@ def add_to_play_history(url: str):
     play_history_str = ", ".join([f"{u} ({int(time.time() - t)}s ago)" for u, t in recent_play_history])
     debug(f"Current play history: {play_history_str}")
 
+    # Since this station is playing successfully, clear it from any error caches
+    if url in consecutive_failures:
+        consecutive_failures.remove(url)
+
+    # Mark it as checked and good in our cache
+    checked_stations[url] = True
+    if url in failed_stations:
+        del failed_stations[url]
+
 def get_recency_penalty(url: str) -> float:
     """
     Calculate a penalty for recently played stations
@@ -290,6 +332,47 @@ def clean_failed_stations():
         debug(f"Too many consecutive failures ({len(consecutive_failures)}), resetting exclusion list")
         consecutive_failures.clear()
 
+def verify_previously_working_stations(stations: List[str]) -> List[str]:
+    """
+    Check if stations that were previously working are still working.
+    Returns a list of stations that are verified to be working now.
+
+    Args:
+        stations: List of station URLs to verify
+
+    Returns:
+        List of working stations
+    """
+    working_stations = []
+
+    # First, look at recent play history for stations that worked recently
+    recently_played = [url for url, _ in recent_play_history]
+
+    # For stations that played successfully in this session, reset their cache
+    # and re-check them first
+    for url in recently_played:
+        if url in stations:
+            # Force a fresh check of this previously working station
+            reset_station_cache(url)
+            if check_station_url(url, force_check=True):
+                working_stations.append(url)
+
+    # If we found at least a couple working stations, return those
+    if len(working_stations) >= 2:
+        return working_stations
+
+    # Otherwise, check a random sample of other stations
+    remaining = [s for s in stations if s not in working_stations]
+    random.shuffle(remaining)
+
+    # Try up to 5 more stations
+    for url in remaining[:5]:
+        reset_station_cache(url)
+        if check_station_url(url, force_check=True):
+            working_stations.append(url)
+
+    return working_stations
+
 def select_diverse_station(available_stations: List[str], exclude: Optional[str] = None):
     """
     Select a station with emphasis on diversity - tries to avoid recently played stations
@@ -352,6 +435,20 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
     tried = set()
     attempts = 0
 
+    # Before randomly trying stations, let's verify if any previously working ones
+    # are still available
+    working_stations = verify_previously_working_stations(stations)
+    if working_stations and exclude in working_stations:
+        working_stations.remove(exclude)
+
+    if working_stations:
+        debug(f"Found {len(working_stations)} verified working stations")
+        # Use the diverse station algorithm on these known-good stations
+        diverse_pick = select_diverse_station(working_stations, exclude)
+        if diverse_pick:
+            debug(f"Selected verified working station: {diverse_pick}")
+            return diverse_pick
+
     # Filter out excluded station
     available_stations = [s for s in stations if s != exclude]
     if not available_stations and exclude and check_station_url(exclude):
@@ -399,7 +496,11 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
             play_count = get_play_count_in_history(url)
             debug(f"Attempt {attempts}/{max_attempts}: Trying {url} (score: {score:.2f}, recency penalty: {get_recency_penalty(url):.2f}, played {play_count} times)")
 
-            if check_station_url(url):
+            # Clear this URL from the cache to ensure a fresh check
+            # This is important for stations that might have failed earlier
+            reset_station_cache(url)
+
+            if check_station_url(url, force_check=True):
                 debug(f"Found working station: {url}")
                 # Add to play history
                 add_to_play_history(url)
@@ -415,9 +516,10 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
     # If we have too many consecutive failures, clear the list and try again with one random station
     if len(consecutive_failures) > MAX_CONSECUTIVE_FAILURES and len(stations) > MAX_CONSECUTIVE_FAILURES:
         consecutive_failures.clear()
+        reset_station_cache()  # Reset all station caches
         debug("Too many consecutive failures, resetting and trying a random station")
         url = random.choice(stations)
-        if check_station_url(url):
+        if check_station_url(url, force_check=True):
             add_to_play_history(url)
             return url
 

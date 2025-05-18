@@ -8,11 +8,12 @@ import numpy as np
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
+import traceback
 
 from config import RATE, CHANNELS, executor, HOLD_SEC, debug
 from audio_core import read_frames, looped_segment
 from streaming import open_stream
-from station_manager import get_random_station, add_to_play_history
+from station_manager import get_random_station, add_to_play_history, check_station_url, reset_station_cache
 
 # Timeout for prefetch operations in seconds
 PREFETCH_TIMEOUT = 5
@@ -92,9 +93,32 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
     # Track excluded stations for this prefetch cycle
     excluded_for_prefetch = set()
 
+    # Flag to indicate a successful prefetch is ready
+    prefetch_success = False
+    # Time to initiate scheduled switch (will be updated when prefetch succeeds)
+    scheduled_switch_time = None
+    # Successfully prefetched URL and stream
+    prefetched_url = None
+    prefetched_stream = None
+
+    # Debug counter for prefetch checks
+    prefetch_check_counter = 0
+
+    # Time of last station reset (to avoid hammering same URLs)
+    last_station_reset_time = time.time()
+    # How often to reset station exclusion list (30 minutes)
+    STATION_RESET_INTERVAL = 1800
+
     while True:
-        # If current stream is unhealthy, start crossfade to static
         current_time = time.time()
+
+        # Periodically reset excluded stations to prevent getting stuck
+        if current_time - last_station_reset_time > STATION_RESET_INTERVAL:
+            excluded_for_prefetch.clear()
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Reset station exclusion list")
+            last_station_reset_time = current_time
+
+        # If current stream is unhealthy, start crossfade to static
         if current_time >= next_health_check and fade_phase is None:
             try:
                 # Simple check - try to get a frame
@@ -116,15 +140,15 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                 if stream_health[current]['errors'] >= 3:
                     debug(f"Stream unhealthy, starting emergency crossfade")
                     # Force a crossfade if not already in one
-                    if fade_phase is None and prefetch_job is None:
+                    if fade_phase is None and prefetch_job is None and not prefetch_success:
                         try:
                             target_url = get_random_station(stations, exclude=current_url)
                             excluded_for_prefetch = {current_url}
                             prefetch_job = executor.submit(open_stream, target_url)
                             prefetch_start_time = time.time()
                             prefetch_failures = 0
-                            fade_phase, fade_pos = 'out', 0
                             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Emergency switch - prefetching →", target_url)
+                            # Don't start fade yet - wait for successful prefetch
                         except Exception as e:
                             print(f"Emergency switch failed: {e}")
 
@@ -135,6 +159,7 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
             prefetch_job = None
             prefetch_start_time = None
             prefetch_failures += 1
+            prefetch_success = False
 
             # Add the failed station to our exclusion list
             if target_url:
@@ -143,14 +168,25 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
             # If we're in hold phase and haven't failed too many times, try another station
             if fade_phase == 'hold' and prefetch_failures < MAX_PREFETCH_FAILURES:
                 try:
+                    # Reset any station caches to ensure fresh checks
+                    reset_station_cache()
+
                     # Get a random station, excluding those we've already tried
                     all_excluded = excluded_for_prefetch.copy()
                     if current_url:
                         all_excluded.add(current_url)
-                    target_url = get_random_station(
-                        [s for s in stations if s not in all_excluded],
-                        exclude=current_url
-                    )
+
+                    # Get a fresh list of stations to try
+                    available_stations = [s for s in stations if s not in all_excluded]
+                    # If we've tried too many, reset and try some that failed before too
+                    if len(available_stations) < 3 and len(all_excluded) > 5:
+                        print(f"Exhausted stations, resetting exclusion list")
+                        excluded_for_prefetch.clear()
+                        all_excluded = {current_url} if current_url else set()
+                        available_stations = [s for s in stations if s not in all_excluded]
+
+                    target_url = get_random_station(available_stations, exclude=current_url)
+
                     prefetch_job = executor.submit(open_stream, target_url)
                     prefetch_start_time = time.time()
                     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Retrying prefetch after timeout ({prefetch_failures}/{MAX_PREFETCH_FAILURES}) →", target_url)
@@ -171,6 +207,116 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                 next_switch = time.time() + playtime
                 prefetch_failures = 0
                 excluded_for_prefetch.clear()
+
+        # Check if prefetch job completed successfully
+        if prefetch_job and prefetch_job.done():
+            prefetch_check_counter += 1
+            if prefetch_check_counter % 10 == 0:  # Reduce log spam
+                debug(f"Checking prefetch job completion (attempt {prefetch_check_counter})")
+
+            try:
+                # Non-blocking check of the prefetch result (increased timeout)
+                stream_result = prefetch_job.result(timeout=0.01)
+
+                # Store the successful prefetch
+                prefetched_stream = stream_result
+                prefetched_url = target_url  # Save the URL that was prefetched
+                prefetch_job = None
+                prefetch_start_time = None
+                prefetch_success = True
+                prefetch_failures = 0  # Reset failures when we have a success
+                prefetch_check_counter = 0  # Reset counter
+
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Prefetch successful for {prefetched_url}")
+
+                # Set a time to start the crossfade - immediately for emergency switches,
+                # or schedule it for later for regular switches
+                if fade_phase is None:  # Not an emergency case
+                    scheduled_switch_time = time.time()
+                    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Will switch shortly")
+                else:
+                    # Emergency case - start fade-in immediately if we were in hold
+                    if fade_phase == 'hold':
+                        fade_phase, fade_pos = 'in', 0
+                        next_stream = prefetched_stream
+                        current_url = prefetched_url
+                        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Now playing →", current_url)
+
+                        # Reset stream health
+                        if current in stream_health:
+                            del stream_health[current]
+                        stream_health[next_stream] = {
+                            'errors': 0,
+                            'last_error': None,
+                            'silence_count': 0
+                        }
+
+                        # Reset after we've used this prefetched stream
+                        prefetch_success = False
+                        prefetched_url = None
+                        prefetched_stream = None
+                    elif fade_phase is None:
+                        # Start the fade sequence when appropriate
+                        # (this will be managed by the scheduled_switch_time section)
+                        pass
+
+            except FutureTimeoutError:
+                # This is normal - the job is still running
+                pass
+            except Exception as e:
+                print(f"Prefetch failed: {str(e)}")
+                traceback.print_exc()  # Print detailed error info
+                prefetch_job = None
+                prefetch_start_time = None
+                prefetch_failures += 1
+                prefetch_success = False
+                prefetched_url = None
+                prefetched_stream = None
+                prefetch_check_counter = 0  # Reset counter
+
+                # Add the failed station to our exclusion list
+                if target_url:
+                    excluded_for_prefetch.add(target_url)
+
+                # If we were in an emergency situation, try another station
+                if fade_phase is not None and prefetch_failures < MAX_PREFETCH_FAILURES:
+                    try:
+                        # Get a random station, excluding those we've already tried
+                        all_excluded = excluded_for_prefetch.copy()
+                        if current_url:
+                            all_excluded.add(current_url)
+
+                        # Get a fresh list of stations to try
+                        available_stations = [s for s in stations if s not in all_excluded]
+                        # If we've tried too many, reset and try some that failed before too
+                        if len(available_stations) < 3 and len(all_excluded) > 5:
+                            print(f"Exhausted stations, resetting exclusion list")
+                            excluded_for_prefetch.clear()
+                            all_excluded = {current_url} if current_url else set()
+                            available_stations = [s for s in stations if s not in all_excluded]
+
+                        target_url = get_random_station(available_stations, exclude=current_url)
+
+                        prefetch_job = executor.submit(open_stream, target_url)
+                        prefetch_start_time = time.time()
+                        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Retrying prefetch ({prefetch_failures}/{MAX_PREFETCH_FAILURES}) →", target_url)
+                    except Exception as retry_error:
+                        print(f"Retry failed: {retry_error}")
+                        # If we've failed too many times, go back to the current station
+                        if prefetch_failures >= MAX_PREFETCH_FAILURES:
+                            print("Too many consecutive prefetch failures, falling back to current station")
+                            # Reset fade to go back to current station
+                            fade_phase = None
+                            next_switch = time.time() + playtime
+                        else:
+                            next_switch = time.time() + 10  # Short delay before trying again
+                elif prefetch_failures >= MAX_PREFETCH_FAILURES:
+                    # Too many failures, go back to current station
+                    print("Too many consecutive prefetch failures, falling back to current station")
+                    fade_phase = None
+                    next_switch = time.time() + playtime
+                    prefetch_failures = 0
+                    excluded_for_prefetch.clear()
 
         samples = np.zeros(required*CHANNELS, dtype=np.int16)
 
@@ -197,15 +343,22 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                 except Exception as e:
                     print(f"Error reading from current stream: {e}")
                     # On error, transition to a new station
-                    if prefetch_job is None:
+                    if prefetch_job is None and not prefetch_success:
                         try:
-                            target_url = get_random_station(stations, exclude=current_url)
+                            # Exclude stations we've already tried and failed
+                            available_stations = [s for s in stations if s not in excluded_for_prefetch]
+                            if len(available_stations) < 3:  # Too few stations left
+                                print("Limited stations available, resetting exclusion list")
+                                excluded_for_prefetch.clear()
+                                available_stations = stations
+
+                            target_url = get_random_station(available_stations, exclude=current_url)
                             excluded_for_prefetch = {current_url}
                             prefetch_job = executor.submit(open_stream, target_url)
                             prefetch_start_time = time.time()
                             prefetch_failures = 0
-                            fade_phase, fade_pos = 'out', 0
                             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Stream error - prefetching →", target_url)
+                            # We'll start the fade-out only when prefetch succeeds
                         except Exception as fallback_error:
                             print(f"Error during fallback: {fallback_error}")
                     # Return silence for this frame
@@ -231,6 +384,16 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                     static_pos = (static_pos + required) % (len(static_pcm)//CHANNELS)
                     if fade_pos >= fade*RATE:
                         fade_phase, fade_pos = 'hold', 0
+                        # If we already have a successful prefetch, we can go straight to fade-in
+                        if prefetch_success:
+                            fade_phase = 'in'
+                            next_stream = prefetched_stream
+                            current_url = prefetched_url
+                            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Going straight to fade-in for {current_url}")
+                            # Clear the prefetch info since we're using it
+                            prefetch_success = False
+                            prefetched_stream = None
+                            prefetched_url = None
 
                 elif fade_phase == 'hold':  # static full
                     samples[:] = read_frames(looped_segment(static_pcm, static_pos, required),
@@ -238,69 +401,26 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                     fade_pos += required
                     static_pos = (static_pos + required) % (len(static_pcm)//CHANNELS)
 
-                    # ready? start fade-in
-                    if prefetch_job and prefetch_job.done():
-                        try:
-                            next_stream = prefetch_job.result(timeout=0.5)  # Non-blocking check
-                            prefetch_job = None
-                            prefetch_start_time = None
-                            prefetch_failures = 0
-                            excluded_for_prefetch.clear()
-                            current_url = target_url
-                            fade_phase, fade_pos = 'in', 0
-                            next_switch = time.time() + playtime
-                            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Now playing →", current_url)
+                    # If we have a successfully prefetched stream, start the fade-in
+                    if prefetch_success:
+                        fade_phase, fade_pos = 'in', 0
+                        next_stream = prefetched_stream
+                        current_url = prefetched_url
+                        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Now playing →", current_url)
 
-                            # Reset stream health
-                            if current in stream_health:
-                                del stream_health[current]
-                            stream_health[next_stream] = {
-                                'errors': 0,
-                                'last_error': None,
-                                'silence_count': 0
-                            }
+                        # Reset stream health
+                        if current in stream_health:
+                            del stream_health[current]
+                        stream_health[next_stream] = {
+                            'errors': 0,
+                            'last_error': None,
+                            'silence_count': 0
+                        }
 
-                        except (Exception, FutureTimeoutError) as e:
-                            print(f"Stream failed: {e}")
-                            prefetch_job = None
-                            prefetch_start_time = None
-                            prefetch_failures += 1
-
-                            # Add the failed station to our exclusion list
-                            if target_url:
-                                excluded_for_prefetch.add(target_url)
-
-                            # Try a different station if we haven't failed too many times
-                            if prefetch_failures < MAX_PREFETCH_FAILURES:
-                                try:
-                                    # Get a random station, excluding those we've already tried
-                                    all_excluded = excluded_for_prefetch.copy()
-                                    if current_url:
-                                        all_excluded.add(current_url)
-                                    target_url = get_random_station(
-                                        [s for s in stations if s not in all_excluded],
-                                        exclude=current_url
-                                    )
-                                    prefetch_job = executor.submit(open_stream, target_url)
-                                    prefetch_start_time = time.time()
-                                    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Retrying prefetch ({prefetch_failures}/{MAX_PREFETCH_FAILURES}) →", target_url)
-                                except Exception as retry_error:
-                                    print(f"Retry failed: {retry_error}")
-                                    # If we've failed too many times, go back to the current station
-                                    if prefetch_failures >= MAX_PREFETCH_FAILURES:
-                                        print("Too many consecutive prefetch failures, falling back to current station")
-                                        # Reset fade to go back to current station
-                                        fade_phase = None
-                                        next_switch = time.time() + playtime
-                                    else:
-                                        next_switch = time.time() + 10  # Short delay before trying again
-                            else:
-                                # Too many failures, go back to current station
-                                print("Too many consecutive prefetch failures, falling back to current station")
-                                fade_phase = None
-                                next_switch = time.time() + playtime
-                                prefetch_failures = 0
-                                excluded_for_prefetch.clear()
+                        # Clear the prefetch info since we're using it
+                        prefetch_success = False
+                        prefetched_stream = None
+                        prefetched_url = None
 
                 elif fade_phase == 'in':  # static → next station
                     dry = read_frames(looped_segment(static_pcm, static_pos, required),
@@ -323,10 +443,18 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                                     all_excluded.add(current_url)
                                 if target_url:
                                     all_excluded.add(target_url)
-                                target_url = get_random_station(
-                                    [s for s in stations if s not in all_excluded],
-                                    exclude=current_url
-                                )
+
+                                # Get a fresh list of stations to try
+                                available_stations = [s for s in stations if s not in all_excluded]
+                                # If we've tried too many, reset and try some that failed before too
+                                if len(available_stations) < 3 and len(all_excluded) > 5:
+                                    print(f"Exhausted stations, resetting exclusion list")
+                                    excluded_for_prefetch.clear()
+                                    all_excluded = {current_url} if current_url else set()
+                                    available_stations = [s for s in stations if s not in all_excluded]
+
+                                target_url = get_random_station(available_stations, exclude=current_url)
+
                                 prefetch_job = executor.submit(open_stream, target_url)
                                 prefetch_start_time = time.time()
                                 print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Fade-in failed, trying ({prefetch_failures}/{MAX_PREFETCH_FAILURES}) →", target_url)
@@ -358,6 +486,7 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                     static_pos = (static_pos + required) % (len(static_pcm)//CHANNELS)
                     if fade_pos >= fade*RATE:
                         current = next_stream
+                        next_stream = None
                         next_switch = time.time() + playtime
                         fade_phase = None
                         prefetch_failures = 0
@@ -366,27 +495,52 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
             # ───── launch prefetch just *before* we need it ────────────────────
             if (fade_phase is None and
                     prefetch_job is None and
+                    not prefetch_success and
                     time.time() >= next_switch - (fade + HOLD_SEC)):
                 try:
-                    target_url = get_random_station(stations, exclude=current_url)
-                    excluded_for_prefetch = {current_url}
+                    # Reset excluded_for_prefetch if we've tried most stations
+                    if len(excluded_for_prefetch) > len(stations) // 2:
+                        excluded_for_prefetch.clear()
+                        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Reset exclusion list to try more stations")
+
+                    # Reset any station caches to ensure fresh checks
+                    reset_station_cache()
+
+                    # First check if there are known good stations
+                    # Exclude stations we've excluded this cycle
+                    available_stations = [s for s in stations if s not in excluded_for_prefetch and s != current_url]
+
+                    # If no stations available after exclusions, try all except current
+                    if not available_stations:
+                        available_stations = [s for s in stations if s != current_url]
+                        # If still nothing, use all stations
+                        if not available_stations:
+                            available_stations = stations
+
+                    target_url = get_random_station(available_stations, exclude=current_url)
+                    excluded_for_prefetch.add(current_url)
+
                     prefetch_job = executor.submit(open_stream, target_url)
                     prefetch_start_time = time.time()
                     prefetch_failures = 0
-                    fade_phase, fade_pos = 'out', 0
                     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Prefetching →", target_url)
+                    # Don't start the fade yet - wait for successful prefetch
                 except Exception as e:
                     print(f"Prefetch failed: {e}")
                     next_switch = time.time() + 10  # Brief delay before retry
 
-            # ───── extend hold if stream not ready yet (avoids silence) ───────
-            if fade_phase == 'hold' and prefetch_job and not prefetch_job.done():
-                # Only extend for a reasonable amount of time, not indefinitely
-                if prefetch_start_time and time.time() - prefetch_start_time < PREFETCH_TIMEOUT:
-                    next_switch += required / RATE
+            # Start the crossfade if we have a successful prefetch and it's time to switch
+            if (fade_phase is None and
+                    prefetch_success and
+                    scheduled_switch_time is not None and
+                    time.time() >= scheduled_switch_time):
+                fade_phase, fade_pos = 'out', 0
+                scheduled_switch_time = None
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Starting crossfade to {prefetched_url}")
 
         except Exception as e:
             print(f"Unexpected error in mixer: {e}")
+            traceback.print_exc()  # Print detailed error info
             # Return silence for this frame if we hit an unexpected error
             samples = np.zeros(required*CHANNELS, dtype=np.int16)
 
