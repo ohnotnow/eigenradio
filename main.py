@@ -16,12 +16,14 @@ import argparse
 import miniaudio as ma
 import time
 import signal
+import random
 
 # Import modules
 from config import set_debug
-from station_manager import parse_m3u, parse_icecast
+from station_manager import parse_m3u, parse_icecast, get_random_station
 from audio_core import produce_pcm, radio_player, FRAME_SIZE
 from mixer import radio_mixer
+from streaming import open_stream, StreamConnectionError, StreamTimeoutError
 
 # Global flag for clean shutdown
 running = True
@@ -29,6 +31,9 @@ running = True
 force_exit = False
 # Counter for SIGINT signals
 sigint_count = 0
+
+# Maximum initial attempts
+MAX_INITIAL_ATTEMPTS = 10
 
 def signal_handler(sig, frame):
     """Handle interrupt signals for clean shutdown"""
@@ -44,6 +49,43 @@ def signal_handler(sig, frame):
         force_exit = True
         # Force exit after a short delay to allow message to be printed
         os._exit(0)
+
+def find_working_initial_station(stations, max_attempts=MAX_INITIAL_ATTEMPTS):
+    """Find a working initial station or exit if none available"""
+    print(f"Finding initial station from {len(stations)} stations...")
+
+    tried_stations = set()
+    attempts = 0
+
+    while attempts < max_attempts:
+        try:
+            # Try to get a random station that we haven't tried yet
+            available_stations = [s for s in stations if s not in tried_stations]
+            if not available_stations:
+                print(f"Tried all available stations ({len(tried_stations)}), none working!")
+                return None
+
+            url = random.choice(available_stations)
+            tried_stations.add(url)
+
+            print(f"Trying initial station {attempts+1}/{max_attempts}: {url}")
+            stream = open_stream(url)
+
+            # Try to get one frame to verify it's working
+            next(stream)
+            print(f"Found working initial station: {url}")
+            return url, stream
+
+        except (StreamConnectionError, StreamTimeoutError) as e:
+            print(f"Station connection failed: {e}")
+        except Exception as e:
+            print(f"Unexpected error with station: {e}")
+
+        attempts += 1
+        time.sleep(0.5)  # Brief pause before next attempt
+
+    print(f"Failed to find a working station after {max_attempts} attempts.")
+    return None
 
 def main(args):
     """Main function to start the radio player"""
@@ -80,8 +122,17 @@ def main(args):
                                nchannels=2,
                                sample_rate=44100).samples  # array('h')
 
-    # Create mixer and start producer thread
-    mixer = radio_mixer(stations, static_pcm, args.playtime, args.fade)
+    # Find an initial working station
+    result = find_working_initial_station(stations)
+    if not result:
+        print("Could not find a working initial station. Exiting.")
+        sys.exit(1)
+
+    initial_url, initial_stream = result
+
+    # Create mixer with the already opened stream
+    mixer = radio_mixer(stations, static_pcm, args.playtime, args.fade,
+                      initial_url=initial_url, initial_stream=initial_stream)
     next(mixer)  # prime coroutine
 
     producer_thread = threading.Thread(target=produce_pcm,

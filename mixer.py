@@ -23,7 +23,8 @@ class StreamError(Exception):
     """Exception for stream-related errors"""
     pass
 
-def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3):
+def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
+               initial_url: Optional[str] = None, initial_stream = None):
     """
     Core mixer generator that handles crossfading between radio stations
 
@@ -32,12 +33,14 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3):
         static_pcm: Static noise PCM data
         playtime: Duration to play each station in seconds
         fade: Fade duration in seconds
+        initial_url: Optional pre-verified initial station URL
+        initial_stream: Optional pre-opened stream for initial station
     """
     required = yield b''  # priming handshake
 
     # Station management
-    current_url = None
-    current = None
+    current_url = initial_url
+    current = initial_stream
 
     # Stream health monitoring
     stream_health: Dict[Any, Dict[str, Any]] = {}
@@ -47,20 +50,24 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3):
     # For tracking failed prefetch attempts
     prefetch_failures = 0
 
-    # Initialize with first stream
-    while current is None:
-        try:
-            current_url = get_random_station(stations)
-            current = open_stream(current_url)
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Now playing →", current_url)
-            consecutive_errors = 0
-        except Exception as e:
-            consecutive_errors += 1
-            print(f"Error starting initial stream: {e}")
-            if consecutive_errors >= 5:
-                print("Too many consecutive errors, giving up")
-                raise
-            time.sleep(1)  # Brief pause before retry
+    # Initialize with first stream if not provided
+    if current is None:
+        while current is None:
+            try:
+                current_url = get_random_station(stations)
+                current = open_stream(current_url)
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Now playing →", current_url)
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                print(f"Error starting initial stream: {e}")
+                if consecutive_errors >= 5:
+                    print("Too many consecutive errors, giving up")
+                    raise
+                time.sleep(1)  # Brief pause before retry
+    else:
+        # Already have a stream from the caller
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Now playing →", current_url)
 
     next_switch = time.time() + playtime
     fade_phase = None  # None/out/hold/in
