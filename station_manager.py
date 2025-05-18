@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 import time
 import json
 import os
-from typing import List, Optional, Set, Dict
+from typing import List, Optional, Set, Dict, Tuple
 
 from config import debug
 
@@ -29,6 +29,20 @@ consecutive_failures: Set[str] = set()
 station_stats: Dict[str, Dict] = {}
 # Maximum consecutive failures before we reset our exclusion list
 MAX_CONSECUTIVE_FAILURES = 10
+
+# Track recently played stations in this session
+# Format: (url, timestamp)
+recent_play_history: List[Tuple[str, float]] = []
+# Maximum play history to maintain
+MAX_PLAY_HISTORY = 15
+# How much to penalize recently played stations (higher = stronger preference for fresh stations)
+# Increased from 0.3 to 0.7 to make the penalty more influential
+RECENT_PLAY_PENALTY = 0.7
+# Time window where the recency penalty gradually decreases (in seconds)
+# Increased from 1 hour to 3 hours to extend the penalty duration
+RECENCY_WINDOW = 10800  # 3 hours
+# Minimum number of stations to try in each selection round
+MIN_SELECTION_CANDIDATES = 5
 
 def load_stats_from_disk():
     """Load station stats from disk"""
@@ -173,9 +187,50 @@ def update_station_stats(url: str, success: bool):
     if stats['attempts'] % 5 == 0:
         save_stats_to_disk()
 
+def add_to_play_history(url: str):
+    """Add a station to the play history"""
+    global recent_play_history
+    current_time = time.time()
+    recent_play_history.append((url, current_time))
+
+    # Keep history limited to MAX_PLAY_HISTORY entries
+    if len(recent_play_history) > MAX_PLAY_HISTORY:
+        recent_play_history = recent_play_history[-MAX_PLAY_HISTORY:]
+
+    debug(f"Updated play history: now tracking {len(recent_play_history)} recent stations")
+    # Print current play history for debugging
+    play_history_str = ", ".join([f"{u} ({int(time.time() - t)}s ago)" for u, t in recent_play_history])
+    debug(f"Current play history: {play_history_str}")
+
+def get_recency_penalty(url: str) -> float:
+    """
+    Calculate a penalty for recently played stations
+
+    Returns a value between 0 and RECENT_PLAY_PENALTY, where higher means more penalty
+    """
+    current_time = time.time()
+    max_penalty = 0.0
+
+    # Check if the station is in the play history
+    for station_url, timestamp in recent_play_history:
+        if station_url == url:
+            # Calculate how recently it was played
+            time_since_played = current_time - timestamp
+
+            # If it was played within the recency window, apply a penalty
+            if time_since_played < RECENCY_WINDOW:
+                # Penalty decreases linearly with time
+                penalty_factor = 1 - (time_since_played / RECENCY_WINDOW)
+                penalty = RECENT_PLAY_PENALTY * penalty_factor
+                # Take the highest penalty if played multiple times
+                if penalty > max_penalty:
+                    max_penalty = penalty
+
+    return max_penalty
+
 def get_station_score(url: str) -> float:
     """
-    Calculate a score for a station based on its reliability
+    Calculate a score for a station based on its reliability and recency
 
     Returns a value between 0 and 1, where higher is better
     """
@@ -210,7 +265,16 @@ def get_station_score(url: str) -> float:
             recency_bonus = 1 - (seconds_since_success / FAILED_STATION_AVOID_DURATION)
             score = score + (1 - score) * recency_bonus * 0.5
 
-    return score
+    # Apply recency penalty for stations played recently
+    recency_penalty = get_recency_penalty(url)
+    score -= recency_penalty
+
+    # Ensure score stays in 0-1 range
+    return max(0.0, min(1.0, score))
+
+def get_play_count_in_history(url: str) -> int:
+    """Count how many times a station appears in the play history"""
+    return sum(1 for station_url, _ in recent_play_history if station_url == url)
 
 def clean_failed_stations():
     """Remove expired entries from failed_stations"""
@@ -226,9 +290,50 @@ def clean_failed_stations():
         debug(f"Too many consecutive failures ({len(consecutive_failures)}), resetting exclusion list")
         consecutive_failures.clear()
 
+def select_diverse_station(available_stations: List[str], exclude: Optional[str] = None):
+    """
+    Select a station with emphasis on diversity - tries to avoid recently played stations
+    """
+    if not available_stations:
+        return None
+
+    # Remove excluded station if present
+    candidates = [s for s in available_stations if s != exclude]
+    if not candidates:
+        return None
+
+    # Group stations by how many times they've appeared in history
+    play_counts = {}
+    for station in candidates:
+        count = get_play_count_in_history(station)
+        if count not in play_counts:
+            play_counts[count] = []
+        play_counts[count].append(station)
+
+    # Start with stations that have been played the least
+    min_count = min(play_counts.keys()) if play_counts else 0
+    least_played = play_counts.get(min_count, candidates)
+
+    # Score these least-played stations
+    scored_candidates = [(url, get_station_score(url)) for url in least_played]
+    # Sort by score, highest first
+    scored_candidates.sort(key=lambda x: x[1], reverse=True)
+
+    # Debug info about selection
+    debug(f"Selecting from {len(least_played)} least-played stations (played {min_count} times)")
+    for url, score in scored_candidates[:5]:  # Show top 5 for brevity
+        debug(f"  {url}: score={score:.2f}, penalty={get_recency_penalty(url):.2f}, play_count={get_play_count_in_history(url)}")
+
+    # Return the highest-scoring station among the least-played ones
+    if scored_candidates:
+        return scored_candidates[0][0]
+
+    return random.choice(candidates)  # Fallback
+
 def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[str] = None) -> str:
     """
-    Get a random working station from the list
+    Get a random working station from the list, with preference for stations
+    that haven't been played recently.
 
     Args:
         stations: List of station URLs
@@ -254,18 +359,36 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
         debug("No alternative stations available, reusing current")
         return exclude
 
-    # Choose stations based on their reliability score
+    # Choose stations based on their reliability score and play history
     while attempts < max_attempts and len(tried) < len(available_stations):
+        # Get at least MIN_SELECTION_CANDIDATES to ensure we have enough diversity
+        num_candidates = max(MIN_SELECTION_CANDIDATES, min(10, len(available_stations) - len(tried)))
+
         # Select a batch of random stations to score
         candidates = []
-        for _ in range(min(10, len(available_stations) - len(tried))):
+        for _ in range(num_candidates):
+            if len(candidates) >= len(available_stations) - len(tried):
+                break
+
             candidate = random.choice(available_stations)
-            while candidate in tried:
+            while candidate in tried and candidate in candidates:
                 candidate = random.choice(available_stations)
             candidates.append(candidate)
             tried.add(candidate)
 
-        # Score the candidates
+        # Try using the diverse station selection first
+        diverse_candidate = select_diverse_station(candidates, exclude)
+        if diverse_candidate:
+            attempts += 1
+            debug(f"Attempt {attempts}/{max_attempts}: Trying diverse candidate {diverse_candidate}")
+
+            if check_station_url(diverse_candidate):
+                debug(f"Found working station: {diverse_candidate}")
+                # Add to play history
+                add_to_play_history(diverse_candidate)
+                return diverse_candidate
+
+        # Fall back to traditional scoring method if diverse selection fails
         scored_candidates = [(url, get_station_score(url)) for url in candidates]
         # Sort by score, highest first
         scored_candidates.sort(key=lambda x: x[1], reverse=True)
@@ -273,15 +396,20 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
         # Try candidates in order of score
         for url, score in scored_candidates:
             attempts += 1
-            debug(f"Attempt {attempts}/{max_attempts}: Trying {url} (score: {score:.2f})")
+            play_count = get_play_count_in_history(url)
+            debug(f"Attempt {attempts}/{max_attempts}: Trying {url} (score: {score:.2f}, recency penalty: {get_recency_penalty(url):.2f}, played {play_count} times)")
 
             if check_station_url(url):
                 debug(f"Found working station: {url}")
+                # Add to play history
+                add_to_play_history(url)
                 return url
 
     # If we've tried all stations without success but exclude works, use it
     if exclude and check_station_url(exclude):
         debug("All alternatives failed, reusing current station")
+        # Add to play history even when reusing
+        add_to_play_history(exclude)
         return exclude
 
     # If we have too many consecutive failures, clear the list and try again with one random station
@@ -290,12 +418,15 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
         debug("Too many consecutive failures, resetting and trying a random station")
         url = random.choice(stations)
         if check_station_url(url):
+            add_to_play_history(url)
             return url
 
     # Last resort - return any random available station without checking
     if len(stations) > 0:
         debug("All checks failed, returning a random station without validation")
-        return random.choice(stations)
+        url = random.choice(stations)
+        add_to_play_history(url)
+        return url
 
     raise Exception(f"No working stations found after {attempts} attempts")
 

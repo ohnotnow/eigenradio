@@ -12,7 +12,7 @@ from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from config import RATE, CHANNELS, executor, HOLD_SEC, debug
 from audio_core import read_frames, looped_segment
 from streaming import open_stream
-from station_manager import get_random_station
+from station_manager import get_random_station, add_to_play_history
 
 # Timeout for prefetch operations in seconds
 PREFETCH_TIMEOUT = 5
@@ -58,6 +58,8 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                 current = open_stream(current_url)
                 print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Now playing →", current_url)
                 consecutive_errors = 0
+                # Add the initial station to play history
+                add_to_play_history(current_url)
             except Exception as e:
                 consecutive_errors += 1
                 print(f"Error starting initial stream: {e}")
@@ -68,6 +70,9 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
     else:
         # Already have a stream from the caller
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Now playing →", current_url)
+        # Add the initial station to play history
+        if current_url:
+            add_to_play_history(current_url)
 
     next_switch = time.time() + playtime
     fade_phase = None  # None/out/hold/in
