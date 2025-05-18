@@ -117,6 +117,10 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
     # Count failures in the first prefetch cycle
     first_cycle_failures = 0
 
+    # Add state variables for non-blocking verification
+    station_verification_future = None
+    station_verification_result = None
+
     while True:
         current_time = time.time()
 
@@ -209,13 +213,16 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                         available_stations = [s for s in stations if s not in all_excluded]
 
                     # First check for known working stations
-                    working_stations_future = verify_previously_working_stations_async(available_stations, executor)
-                    working_stations = working_stations_future.result()  # TODO: Make non-blocking for optimal audio
-                    if working_stations:
-                        print(f"Found {len(working_stations)} verified working stations to try")
-                        target_url = random.choice(working_stations)
-                    else:
-                        target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                    if not station_verification_future:
+                        station_verification_future = verify_previously_working_stations_async(available_stations, executor)
+                    if station_verification_future and station_verification_future.done():
+                        working_stations = station_verification_future.result()
+                        station_verification_future = None
+                        if working_stations:
+                            print(f"Found {len(working_stations)} verified working stations to try")
+                            target_url = random.choice(working_stations)
+                        else:
+                            target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
 
                     prefetch_job = executor.submit(open_stream, target_url)
                     prefetch_start_time = time.time()
@@ -343,27 +350,31 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                             available_stations = [s for s in stations if s not in all_excluded]
 
                         # Check for known working stations first
-                        working_stations_future = verify_previously_working_stations_async(available_stations, executor)
-                        working_stations = working_stations_future.result()  # TODO: Make non-blocking for optimal audio
-                        if working_stations:
-                            print(f"Found {len(working_stations)} verified working stations to try")
-                            target_url = random.choice(working_stations)
-                        else:
-                            target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                        if not station_verification_future:
+                            station_verification_future = verify_previously_working_stations_async(available_stations, executor)
+                        if station_verification_future and station_verification_future.done():
+                            working_stations = station_verification_future.result()
+                            station_verification_future = None
+                            if working_stations:
+                                print(f"Found {len(working_stations)} verified working stations to try")
+                                target_url = random.choice(working_stations)
+                            else:
+                                target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
 
                         prefetch_job = executor.submit(open_stream, target_url)
                         prefetch_start_time = time.time()
-                        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Retrying prefetch ({prefetch_failures}/{MAX_PREFETCH_FAILURES}) →", target_url)
+                        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Fade-in failed, trying ({prefetch_failures}/{MAX_PREFETCH_FAILURES}) →", target_url)
                     except Exception as retry_error:
-                        print(f"Retry failed: {retry_error}")
-                        # If we've failed too many times, go back to the current station
+                        print(f"Retry after fade-in failure failed: {retry_error}")
                         if prefetch_failures >= MAX_PREFETCH_FAILURES:
                             print("Too many consecutive prefetch failures, falling back to current station")
                             # Reset fade to go back to current station
                             fade_phase = None
                             next_switch = time.time() + playtime
+                            prefetch_failures = 0
+                            excluded_for_prefetch.clear()
                         else:
-                            next_switch = time.time() + 10  # Short delay before trying again
+                            next_switch = time.time() + 10
                 elif prefetch_failures >= MAX_PREFETCH_FAILURES:
                     # Too many failures, go back to current station
                     print("Too many consecutive prefetch failures, falling back to current station")
@@ -517,18 +528,16 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
 
                                 # Always prioritize diversity by using the full pool of available stations
                                 # Identify working stations just for fallback if needed
-                                working_stations_future = verify_previously_working_stations_async(available_stations, executor)
-                                working_stations = working_stations_future.result()  # TODO: Make non-blocking for optimal audio
-
-                                # Get a station from the full pool to maximize diversity
-                                # The get_random_station function will already avoid known bad stations
-                                target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
-                                print(f"Selected station from full station pool for maximum diversity: {target_url}")
-
-                                # If no station was found and we have working stations, use one as fallback
-                                if not target_url and working_stations:
-                                    target_url = random.choice(working_stations)
-                                    print(f"Falling back to verified working station: {target_url}")
+                                if not station_verification_future:
+                                    station_verification_future = verify_previously_working_stations_async(available_stations, executor)
+                                if station_verification_future and station_verification_future.done():
+                                    working_stations = station_verification_future.result()
+                                    station_verification_future = None
+                                    if working_stations:
+                                        print(f"Found {len(working_stations)} verified working stations to try")
+                                        target_url = random.choice(working_stations)
+                                    else:
+                                        target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
 
                                 prefetch_job = executor.submit(open_stream, target_url)
                                 prefetch_start_time = time.time()
@@ -604,18 +613,16 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
 
                     # Always prioritize diversity by using the full pool of available stations
                     # Identify working stations just for fallback if needed
-                    working_stations_future = verify_previously_working_stations_async(available_stations, executor)
-                    working_stations = working_stations_future.result()  # TODO: Make non-blocking for optimal audio
-
-                    # Get a station from the full pool to maximize diversity
-                    # The get_random_station function will already avoid known bad stations
-                    target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
-                    print(f"Selected station from full station pool for maximum diversity: {target_url}")
-
-                    # If no station was found and we have working stations, use one as fallback
-                    if not target_url and working_stations:
-                        target_url = random.choice(working_stations)
-                        print(f"Falling back to verified working station: {target_url}")
+                    if not station_verification_future:
+                        station_verification_future = verify_previously_working_stations_async(available_stations, executor)
+                    if station_verification_future and station_verification_future.done():
+                        working_stations = station_verification_future.result()
+                        station_verification_future = None
+                        if working_stations:
+                            print(f"Found {len(working_stations)} verified working stations to try")
+                            target_url = random.choice(working_stations)
+                        else:
+                            target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
 
                     excluded_for_prefetch.add(current_url)
 
