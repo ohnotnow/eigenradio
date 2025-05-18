@@ -14,6 +14,8 @@ import sys
 import threading
 import argparse
 import miniaudio as ma
+import time
+import signal
 
 # Import modules
 from config import set_debug
@@ -21,8 +23,22 @@ from station_manager import parse_m3u, parse_icecast
 from audio_core import produce_pcm, radio_player, FRAME_SIZE
 from mixer import radio_mixer
 
+# Global flag for clean shutdown
+running = True
+
+def signal_handler(sig, frame):
+    """Handle interrupt signals for clean shutdown"""
+    global running
+    print("\nShutting down gracefully... (Ctrl-C again to force quit)")
+    running = False
+
 def main(args):
     """Main function to start the radio player"""
+    global running
+
+    # Register signal handler for clean shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+
     # Load stations
     if args.m3u_file:
         stations = parse_m3u(args.m3u_file)
@@ -55,8 +71,9 @@ def main(args):
     mixer = radio_mixer(stations, static_pcm, args.playtime, args.fade)
     next(mixer)  # prime coroutine
 
-    threading.Thread(target=produce_pcm,
-                     args=(mixer,), daemon=True).start()
+    producer_thread = threading.Thread(target=produce_pcm,
+                     args=(mixer,), daemon=True)
+    producer_thread.start()
 
     # Create player and start playback
     player = radio_player()
@@ -68,12 +85,23 @@ def main(args):
                            buffersize_msec=120) as dev:
         dev.start(player)
         print("▲  Playing…  Ctrl-C to quit")
+
+        # Main loop with clean shutdown
         try:
-            while True:
-                import time
-                time.sleep(1)
+            while running:
+                time.sleep(0.5)
+
+            # Graceful shutdown
+            print("Shutting down...")
+            time.sleep(1)  # Allow final audio to play
+
         except KeyboardInterrupt:
-            pass
+            # Force shutdown on second Ctrl-C
+            print("\nForce quitting...")
+
+        finally:
+            # Ensure everything is cleaned up
+            print("Goodbye!")
 
 
 if __name__ == '__main__':
