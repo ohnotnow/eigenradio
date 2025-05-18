@@ -19,8 +19,10 @@ STATS_FILE = "station_stats.json"
 checked_stations = {}
 # Track failed stations to avoid immediate retries
 failed_stations = {}
-# Maximum age for failed station entries (seconds)
-FAILED_STATION_EXPIRY = 600  # 10 minutes
+# Time to avoid retrying stations that recently failed (8 hours in seconds)
+FAILED_STATION_AVOID_DURATION = 8 * 60 * 60  # 8 hours
+# Maximum allowed failures before permanently blacklisting a station
+MAX_ALLOWED_FAILURES = 5
 # Track consecutively failed stations in a session
 consecutive_failures: Set[str] = set()
 # Track success rate of stations
@@ -72,13 +74,16 @@ def parse_icecast(file_path: str) -> List[str]:
 
 def check_station_url(url: str, timeout=5) -> bool:
     """Check if a station URL is responsive and working"""
-    # Check if this station recently failed
-    if url in failed_stations:
-        failure_time, attempts = failed_stations[url]
-        # If failure was recent and too many attempts, skip it
-        if (time.time() - failure_time < FAILED_STATION_EXPIRY and
-            attempts > 2):
-            debug(f"Skipping recently failed station: {url}")
+    # Check if this station has exceeded maximum allowed failures (permanent blacklist)
+    if url in station_stats and station_stats[url]['failures'] >= MAX_ALLOWED_FAILURES:
+        debug(f"Skipping permanently blacklisted station (failed {station_stats[url]['failures']} times): {url}")
+        return False
+
+    # Check if this station failed within the avoid duration window
+    if url in station_stats and station_stats[url]['last_failure'] is not None:
+        time_since_failure = time.time() - station_stats[url]['last_failure']
+        if time_since_failure < FAILED_STATION_AVOID_DURATION:
+            debug(f"Skipping recently failed station (failed {time_since_failure:.1f} seconds ago): {url}")
             return False
 
     # If it's a consecutive failure in this session, skip it
@@ -182,23 +187,27 @@ def get_station_score(url: str) -> float:
     if total == 0:
         return 0.5
 
+    # If station has reached or exceeded max allowed failures, return 0
+    if stats['failures'] >= MAX_ALLOWED_FAILURES:
+        return 0
+
     # Base score is success rate
     score = stats['successes'] / total
 
     # Reduce score for stations that have failed recently
     if stats['last_failure'] is not None:
         seconds_since_failure = time.time() - stats['last_failure']
-        if seconds_since_failure < FAILED_STATION_EXPIRY:
+        if seconds_since_failure < FAILED_STATION_AVOID_DURATION:
             # Reduce score based on recency of failure
-            recency_penalty = 1 - (seconds_since_failure / FAILED_STATION_EXPIRY)
+            recency_penalty = 1 - (seconds_since_failure / FAILED_STATION_AVOID_DURATION)
             score *= (1 - recency_penalty * 0.5)
 
     # Boost score for stations that succeeded recently
     if stats['last_success'] is not None:
         seconds_since_success = time.time() - stats['last_success']
-        if seconds_since_success < FAILED_STATION_EXPIRY:
+        if seconds_since_success < FAILED_STATION_AVOID_DURATION:
             # Boost score based on recency of success
-            recency_bonus = 1 - (seconds_since_success / FAILED_STATION_EXPIRY)
+            recency_bonus = 1 - (seconds_since_success / FAILED_STATION_AVOID_DURATION)
             score = score + (1 - score) * recency_bonus * 0.5
 
     return score
@@ -207,7 +216,7 @@ def clean_failed_stations():
     """Remove expired entries from failed_stations"""
     current_time = time.time()
     expired = [url for url, (timestamp, _) in failed_stations.items()
-               if current_time - timestamp > FAILED_STATION_EXPIRY]
+               if current_time - timestamp > FAILED_STATION_AVOID_DURATION]
 
     for url in expired:
         del failed_stations[url]

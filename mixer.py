@@ -15,7 +15,7 @@ from streaming import open_stream
 from station_manager import get_random_station
 
 # Timeout for prefetch operations in seconds
-PREFETCH_TIMEOUT = 15
+PREFETCH_TIMEOUT = 5
 # Maximum consecutive prefetch failures before falling back to current station
 MAX_PREFETCH_FAILURES = 5
 
