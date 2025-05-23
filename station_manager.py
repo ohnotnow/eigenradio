@@ -627,5 +627,42 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
 
     raise Exception(f"No working stations found after {attempts} attempts")
 
+def get_fast_random_station(stations: List[str], exclude: Optional[str] = None) -> str:
+    """
+    Get a random station quickly without any blocking operations.
+    This is designed for use in audio processing loops where blocking is not acceptable.
+
+    Args:
+        stations: List of station URLs
+        exclude: URL to exclude (typically the current station)
+
+    Returns:
+        A station URL (not validated for connectivity)
+
+    Raises:
+        Exception: If no stations are available
+    """
+    if not stations:
+        raise Exception("No stations provided")
+
+    # Filter out any None or invalid URLs
+    valid_stations = [s for s in stations if s and isinstance(s, str)]
+    if not valid_stations:
+        raise Exception("No valid station URLs provided")
+
+    # Remove excluded station
+    available_stations = [s for s in valid_stations if s != exclude]
+    if not available_stations:
+        # If all stations are excluded, just use the full list
+        available_stations = valid_stations
+
+    # Use the diverse station selection algorithm but without any blocking operations
+    selected = select_diverse_station(available_stations, exclude)
+    if selected:
+        return selected
+
+    # Fallback to simple random selection
+    return random.choice(available_stations)
+
 # Load stats when module is imported
 load_stats_from_disk()

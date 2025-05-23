@@ -13,7 +13,7 @@ import traceback
 from config import RATE, CHANNELS, executor, HOLD_SEC, debug
 from audio_core import read_frames, looped_segment
 from streaming import open_stream
-from station_manager import get_random_station, add_to_play_history, check_station_url, reset_station_cache, verify_previously_working_stations_async
+from station_manager import get_random_station, add_to_play_history, check_station_url, reset_station_cache, verify_previously_working_stations_async, get_fast_random_station
 
 # Timeout for prefetch operations in seconds
 PREFETCH_TIMEOUT = 5
@@ -159,7 +159,11 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                             reset_station_cache()
                             excluded_for_prefetch.clear()
 
-                            target_url = get_random_station(stations, exclude=current_url, executor=executor)
+                            # Just pick a random station - the prefetch job will handle validation
+                            available_stations = [s for s in stations if s != current_url]
+                            if not available_stations:
+                                available_stations = stations
+                            target_url = get_fast_random_station(available_stations, current_url)
                             excluded_for_prefetch = {current_url}
                             prefetch_job = executor.submit(open_stream, target_url)
                             prefetch_start_time = time.time()
@@ -220,12 +224,13 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                         station_verification_future = None
                         if working_stations:
                             print(f"Found {len(working_stations)} verified working stations to try")
-                            target_url = random.choice(working_stations)
+                            target_url = get_fast_random_station(working_stations, current_url)
                         else:
-                            target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                            # No verified stations, just pick a random one
+                            target_url = get_fast_random_station(available_stations, current_url)
                     else:
-                        # If verification future is not done yet, fallback to get_random_station
-                        target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                        # Verification future not ready, just pick a random station
+                        target_url = get_fast_random_station(available_stations, current_url)
 
                     # Ensure we have a valid target_url before proceeding
                     if target_url is None:
@@ -360,7 +365,8 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                             all_excluded = {current_url} if current_url else set()
                             available_stations = [s for s in stations if s not in all_excluded]
 
-                        # Check for known working stations first
+                        # Always prioritize diversity by using the full pool of available stations
+                        # Identify working stations just for fallback if needed
                         if not station_verification_future:
                             station_verification_future = verify_previously_working_stations_async(available_stations, executor)
                         if station_verification_future and station_verification_future.done():
@@ -368,12 +374,13 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                             station_verification_future = None
                             if working_stations:
                                 print(f"Found {len(working_stations)} verified working stations to try")
-                                target_url = random.choice(working_stations)
+                                target_url = get_fast_random_station(working_stations, current_url)
                             else:
-                                target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                                # No verified stations, just pick a random one
+                                target_url = get_fast_random_station(available_stations, current_url)
                         else:
-                            # If verification future is not done yet, fallback to get_random_station
-                            target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                            # Verification future not ready, just pick a random station
+                            target_url = get_fast_random_station(available_stations, current_url)
 
                         # Ensure we have a valid target_url before proceeding
                         if target_url is None:
@@ -443,7 +450,8 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                                 excluded_for_prefetch.clear()
                                 available_stations = stations
 
-                            target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                            # Just pick a random station - the prefetch job will handle validation
+                            target_url = get_fast_random_station(available_stations, current_url)
                             excluded_for_prefetch = {current_url}
                             prefetch_job = executor.submit(open_stream, target_url)
                             prefetch_start_time = time.time()
@@ -558,12 +566,13 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                                     station_verification_future = None
                                     if working_stations:
                                         print(f"Found {len(working_stations)} verified working stations to try")
-                                        target_url = random.choice(working_stations)
+                                        target_url = get_fast_random_station(working_stations, current_url)
                                     else:
-                                        target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                                        # No verified stations, just pick a random one
+                                        target_url = get_fast_random_station(available_stations, current_url)
                                 else:
-                                    # If verification future is not done yet, fallback to get_random_station
-                                    target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                                    # Verification future not ready, just pick a random station
+                                    target_url = get_fast_random_station(available_stations, current_url)
 
                                 # Ensure we have a valid target_url before proceeding
                                 if target_url is None:
@@ -643,14 +652,14 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                         # Try using current URL in verify to see if any similar stations exist
                         if current_url:
                             reset_station_cache(current_url)  # Reset its cache to ensure fresh check
-                            check_station_url(current_url, force_check=True)  # Force a check
+                            # Note: Removed blocking check_station_url call to prevent audio dropouts
                             add_to_play_history(current_url)  # Re-add to play history
 
                     # Initialize target_url to None to ensure it's always defined
                     target_url = None
 
                     # Always prioritize diversity by using the full pool of available stations
-                    # Identify working stations just for fallback if needed
+                    # Use async verification to get working stations without blocking
                     if not station_verification_future:
                         station_verification_future = verify_previously_working_stations_async(available_stations, executor)
                     if station_verification_future and station_verification_future.done():
@@ -658,12 +667,13 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                         station_verification_future = None
                         if working_stations:
                             print(f"Found {len(working_stations)} verified working stations to try")
-                            target_url = random.choice(working_stations)
+                            target_url = get_fast_random_station(working_stations, current_url)
                         else:
-                            target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                            # No verified stations, just pick a random one
+                            target_url = get_fast_random_station(available_stations, current_url)
                     else:
-                        # If verification future is not done yet, fallback to get_random_station
-                        target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                        # Verification future not ready, just pick a random station
+                        target_url = get_fast_random_station(available_stations, current_url)
 
                     # Ensure we have a valid target_url before proceeding
                     if target_url is None:
@@ -671,6 +681,7 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                         next_switch = time.time() + 10  # Brief delay before retry
                     else:
                         excluded_for_prefetch.add(current_url)
+                        # Submit the prefetch job - this will handle URL checking asynchronously
                         prefetch_job = executor.submit(open_stream, target_url)
                         prefetch_start_time = time.time()
                         prefetch_failures = 0
