@@ -19,7 +19,7 @@ import signal
 import random
 
 # Import modules
-from config import set_debug
+from config import set_debug, executor
 from station_manager import parse_m3u, parse_icecast, get_random_station
 from audio_core import produce_pcm, radio_player, FRAME_SIZE
 from mixer import radio_mixer
@@ -44,11 +44,22 @@ def signal_handler(sig, frame):
     if sigint_count == 1:
         print("\nShutting down gracefully... (Ctrl-C again to force quit)")
         running = False
+
+        # Set a timer to force exit if graceful shutdown takes too long
+        def force_exit_timer():
+            time.sleep(3.0)  # Give 3 seconds for graceful shutdown
+            if not force_exit:
+                print("\nGraceful shutdown taking too long, forcing exit...")
+                os._exit(1)
+
+        timer_thread = threading.Thread(target=force_exit_timer, daemon=True)
+        timer_thread.start()
+
     elif sigint_count >= 2:
         print("\nForce quitting...")
         force_exit = True
-        # Force exit after a short delay to allow message to be printed
-        os._exit(0)
+        # Force exit immediately
+        os._exit(1)
 
 def find_working_initial_station(stations, max_attempts=MAX_INITIAL_ATTEMPTS):
     """Find a working initial station or exit if none available"""
@@ -196,14 +207,22 @@ def main(args):
         print("\nForce quitting...")
 
     finally:
-        # Ensure resources are cleaned up
+        # Ensure resources are cleaned up quickly
+        print("Shutting down...")
+
+        # Close audio device first
         try:
             dev.close()
         except:
             pass
+
+        # Quick executor shutdown without waiting
+        try:
+            executor.shutdown(wait=False)
+        except:
+            pass
+
         print("Goodbye!")
-        # Make sure we exit
-        sys.exit(0)
 
 
 if __name__ == '__main__':

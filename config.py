@@ -19,8 +19,8 @@ PLAY_SEC = 20
 # Debug settings
 DEBUG = False
 
-# Thread management
-executor = ThreadPoolExecutor(max_workers=2)  # for prefetching
+# Thread management - use daemon threads for easier cleanup
+executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prefetch")
 
 # Global state
 _last_good = {}  # generator → last non-empty bytes
