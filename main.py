@@ -69,12 +69,43 @@ def find_working_initial_station(stations, max_attempts=MAX_INITIAL_ATTEMPTS):
             tried_stations.add(url)
 
             print(f"Trying initial station {attempts+1}/{max_attempts}: {url}")
-            stream = open_stream(url)
 
-            # Try to get one frame to verify it's working
-            next(stream)
-            print(f"Found working initial station: {url}")
-            return url, stream
+            # Use a shorter timeout for initial station checks to prevent hanging
+            import signal
+            import threading
+
+            # Set up a timeout for the stream opening
+            result = [None]
+            error = [None]
+
+            def open_with_timeout():
+                try:
+                    stream = open_stream(url)
+                    # Try to get one frame to verify it's working
+                    next(stream)
+                    result[0] = (url, stream)
+                except Exception as e:
+                    error[0] = e
+
+            # Run with timeout
+            thread = threading.Thread(target=open_with_timeout)
+            thread.daemon = True
+            thread.start()
+            thread.join(timeout=8)  # 8 second timeout for initial station check
+
+            if thread.is_alive():
+                print(f"Station connection timed out after 8 seconds: {url}")
+                # Thread is still running, but we'll continue to next station
+                attempts += 1
+                time.sleep(0.5)
+                continue
+
+            if result[0]:
+                url, stream = result[0]
+                print(f"Found working initial station: {url}")
+                return url, stream
+            elif error[0]:
+                raise error[0]
 
         except (StreamConnectionError, StreamTimeoutError) as e:
             print(f"Station connection failed: {e}")

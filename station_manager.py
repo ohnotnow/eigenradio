@@ -117,6 +117,11 @@ def reset_station_cache(url: Optional[str] = None):
 
 def check_station_url(url: str, timeout=5, force_check=False) -> bool:
     """Check if a station URL is responsive and working"""
+    # Basic URL validation first
+    if not url or not isinstance(url, str):
+        debug(f"Invalid URL provided: {url}")
+        return False
+
     # If force check requested, clear the cache for this URL
     if force_check and url in checked_stations:
         del checked_stations[url]
@@ -144,10 +149,10 @@ def check_station_url(url: str, timeout=5, force_check=False) -> bool:
     if url in checked_stations:
         return checked_stations[url]
 
-    # Try to connect
+    # Try to connect with improved timeout handling
     try:
         debug(f"Checking station URL: {url}")
-        # Try HEAD request first (faster)
+        # Try HEAD request first (faster) with explicit timeout
         response = requests.head(url, allow_redirects=True, timeout=timeout)
         if response.status_code == 200:
             checked_stations[url] = True
@@ -158,23 +163,32 @@ def check_station_url(url: str, timeout=5, force_check=False) -> bool:
             update_station_stats(url, True)
             return True
 
-        # Fallback to GET if HEAD fails
+        # Fallback to GET if HEAD fails, with explicit timeout
         debug(f"HEAD request failed for {url}, trying GET")
         response = requests.get(url, stream=True, timeout=timeout)
         if response.status_code == 200:
-            # Read a bit of content to verify stream is active
-            content = next(response.iter_content(1024), None)
-            if content:
-                checked_stations[url] = True
-                # Clear from failed stations if it was there
-                if url in failed_stations:
-                    del failed_stations[url]
-                # Update stats
-                update_station_stats(url, True)
-                return True
+            # Read a bit of content to verify stream is active, with timeout
+            try:
+                content = next(response.iter_content(1024), None)
+                if content:
+                    checked_stations[url] = True
+                    # Clear from failed stations if it was there
+                    if url in failed_stations:
+                        del failed_stations[url]
+                    # Update stats
+                    update_station_stats(url, True)
+                    return True
+            except Exception as content_error:
+                debug(f"Error reading content from {url}: {str(content_error)}")
 
+    except requests.exceptions.Timeout as e:
+        debug(f"Timeout checking station {url}: {str(e)}")
+    except requests.exceptions.ConnectionError as e:
+        debug(f"Connection error checking station {url}: {str(e)}")
     except requests.exceptions.RequestException as e:
-        debug(f"Error checking station {url}: {str(e)}")
+        debug(f"Request error checking station {url}: {str(e)}")
+    except Exception as e:
+        debug(f"Unexpected error checking station {url}: {str(e)}")
 
     # Mark as failed
     checked_stations[url] = False
@@ -452,9 +466,18 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
     Raises:
         Exception: If no working stations could be found
     """
+    # Validate input
+    if not stations:
+        raise Exception("No stations provided")
+
+    # Filter out any None or invalid URLs
+    valid_stations = [s for s in stations if s and isinstance(s, str)]
+    if not valid_stations:
+        raise Exception("No valid station URLs provided")
+
     clean_failed_stations()
 
-    debug(f"Getting random station from {len(stations)} stations")
+    debug(f"Getting random station from {len(valid_stations)} valid stations")
     tried = set()
     attempts = 0
 
@@ -472,20 +495,27 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
             debug(f"Station {station_url} blacklisted (played {time_since_played:.0f} seconds ago)")
 
     # If we have enough stations, filter out all recently played ones
-    if len(stations) - len(recent_blacklist) > 3:
+    if len(valid_stations) - len(recent_blacklist) > 3:
         debug(f"Filtering out {len(recent_blacklist)} recently played stations")
-        filtered_stations = [s for s in stations if s not in recent_blacklist]
+        filtered_stations = [s for s in valid_stations if s not in recent_blacklist]
     else:
         # If filtering would leave too few stations, just continue with all
-        filtered_stations = stations
-        debug(f"Not enough stations to filter ({len(stations)} total, {len(recent_blacklist)} played recently)")
+        filtered_stations = valid_stations
+        debug(f"Not enough stations to filter ({len(valid_stations)} total, {len(recent_blacklist)} played recently)")
 
     # Before randomly trying stations, let's verify if any previously working ones
     # are still available (using our filtered list)
-    working_stations_future = verify_previously_working_stations_async(filtered_stations, executor)
-    working_stations = working_stations_future.result() if executor else []
-    if working_stations and exclude in working_stations:
-        working_stations.remove(exclude)
+    working_stations_future = None
+    working_stations = []
+    if executor:
+        try:
+            working_stations_future = verify_previously_working_stations_async(filtered_stations, executor)
+            working_stations = working_stations_future.result() if working_stations_future else []
+            if exclude and exclude in working_stations:
+                working_stations.remove(exclude)
+        except Exception as e:
+            debug(f"Error during async verification: {e}")
+            working_stations = []
 
     if working_stations:
         debug(f"Found {len(working_stations)} verified working stations")
@@ -493,6 +523,7 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
         diverse_pick = select_diverse_station(working_stations, exclude)
         if diverse_pick:
             debug(f"Selected verified working station: {diverse_pick}")
+            add_to_play_history(diverse_pick)
             return diverse_pick
 
     # Filter out excluded station from our already filtered list
@@ -500,7 +531,16 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
     if not available_stations and exclude and check_station_url(exclude):
         # If all other stations are unavailable, reuse the current one
         debug("No alternative stations available, reusing current")
+        add_to_play_history(exclude)
         return exclude
+
+    # Ensure we have at least some stations to work with
+    if not available_stations:
+        debug("No available stations after filtering, using all valid stations")
+        available_stations = [s for s in valid_stations if s != exclude]
+        if not available_stations:
+            # Last resort - use all stations including the excluded one
+            available_stations = valid_stations
 
     # Choose stations based on their reliability score and play history
     while attempts < max_attempts and len(tried) < len(available_stations):
@@ -514,10 +554,17 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
                 break
 
             candidate = random.choice(available_stations)
-            while candidate in tried and candidate in candidates:
+            while candidate in tried or candidate in candidates:
+                if len(available_stations) - len(tried) <= len(candidates):
+                    break
                 candidate = random.choice(available_stations)
-            candidates.append(candidate)
+
+            if candidate not in tried and candidate not in candidates:
+                candidates.append(candidate)
             tried.add(candidate)
+
+        if not candidates:
+            break
 
         # Try using the diverse station selection first
         diverse_candidate = select_diverse_station(candidates, exclude)
@@ -538,6 +585,8 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
 
         # Try candidates in order of score
         for url, score in scored_candidates:
+            if url in tried:
+                continue
             attempts += 1
             play_count = get_play_count_in_history(url)
             debug(f"Attempt {attempts}/{max_attempts}: Trying {url} (score: {score:.2f}, recency penalty: {get_recency_penalty(url):.2f}, played {play_count} times)")
@@ -560,19 +609,19 @@ def get_random_station(stations: List[str], max_attempts=15, exclude: Optional[s
         return exclude
 
     # If we have too many consecutive failures, clear the list and try again with one random station
-    if len(consecutive_failures) > MAX_CONSECUTIVE_FAILURES and len(stations) > MAX_CONSECUTIVE_FAILURES:
+    if len(consecutive_failures) > MAX_CONSECUTIVE_FAILURES and len(valid_stations) > MAX_CONSECUTIVE_FAILURES:
         consecutive_failures.clear()
         reset_station_cache()  # Reset all station caches
         debug("Too many consecutive failures, resetting and trying a random station")
-        url = random.choice(stations)
+        url = random.choice(valid_stations)
         if check_station_url(url, force_check=True):
             add_to_play_history(url)
             return url
 
     # Last resort - return any random available station without checking
-    if len(stations) > 0:
+    if len(valid_stations) > 0:
         debug("All checks failed, returning a random station without validation")
-        url = random.choice(stations)
+        url = random.choice(valid_stations)
         add_to_play_history(url)
         return url
 

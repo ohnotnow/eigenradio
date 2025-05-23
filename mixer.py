@@ -223,10 +223,21 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                             target_url = random.choice(working_stations)
                         else:
                             target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                    else:
+                        # If verification future is not done yet, fallback to get_random_station
+                        target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
 
-                    prefetch_job = executor.submit(open_stream, target_url)
-                    prefetch_start_time = time.time()
-                    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Retrying prefetch after timeout ({prefetch_failures}/{MAX_PREFETCH_FAILURES}) →", target_url)
+                    # Ensure we have a valid target_url before proceeding
+                    if target_url is None:
+                        print("Warning: Could not find a valid target station, skipping retry")
+                        next_switch = time.time() + 10  # Brief delay before retry
+                    else:
+                        excluded_for_prefetch.add(current_url)
+                        prefetch_job = executor.submit(open_stream, target_url)
+                        prefetch_start_time = time.time()
+                        prefetch_failures = 0
+                        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Prefetching →", target_url)
+                        # Don't start the fade yet - wait for successful prefetch
                 except Exception as e:
                     print(f"Retry after timeout failed: {e}")
                     # If we've failed too many times, go back to the current station
@@ -360,6 +371,18 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                                 target_url = random.choice(working_stations)
                             else:
                                 target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                        else:
+                            # If verification future is not done yet, fallback to get_random_station
+                            target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+
+                        # Ensure we have a valid target_url before proceeding
+                        if target_url is None:
+                            print("Warning: Could not find a valid target station, falling back to current")
+                            fade_phase = None
+                            next_switch = time.time() + playtime
+                            prefetch_failures = 0
+                            excluded_for_prefetch.clear()
+                            continue
 
                         prefetch_job = executor.submit(open_stream, target_url)
                         prefetch_start_time = time.time()
@@ -538,6 +561,18 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                                         target_url = random.choice(working_stations)
                                     else:
                                         target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                                else:
+                                    # If verification future is not done yet, fallback to get_random_station
+                                    target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+
+                                # Ensure we have a valid target_url before proceeding
+                                if target_url is None:
+                                    print("Warning: Could not find a valid target station, falling back to current")
+                                    fade_phase = None
+                                    next_switch = time.time() + playtime
+                                    prefetch_failures = 0
+                                    excluded_for_prefetch.clear()
+                                    continue
 
                                 prefetch_job = executor.submit(open_stream, target_url)
                                 prefetch_start_time = time.time()
@@ -611,6 +646,9 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                             check_station_url(current_url, force_check=True)  # Force a check
                             add_to_play_history(current_url)  # Re-add to play history
 
+                    # Initialize target_url to None to ensure it's always defined
+                    target_url = None
+
                     # Always prioritize diversity by using the full pool of available stations
                     # Identify working stations just for fallback if needed
                     if not station_verification_future:
@@ -623,14 +661,21 @@ def radio_mixer(stations: List[str], static_pcm, playtime=600, fade=3,
                             target_url = random.choice(working_stations)
                         else:
                             target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
+                    else:
+                        # If verification future is not done yet, fallback to get_random_station
+                        target_url = get_random_station(available_stations, exclude=current_url, executor=executor)
 
-                    excluded_for_prefetch.add(current_url)
-
-                    prefetch_job = executor.submit(open_stream, target_url)
-                    prefetch_start_time = time.time()
-                    prefetch_failures = 0
-                    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Prefetching →", target_url)
-                    # Don't start the fade yet - wait for successful prefetch
+                    # Ensure we have a valid target_url before proceeding
+                    if target_url is None:
+                        print("Warning: Could not find a valid target station, skipping retry")
+                        next_switch = time.time() + 10  # Brief delay before retry
+                    else:
+                        excluded_for_prefetch.add(current_url)
+                        prefetch_job = executor.submit(open_stream, target_url)
+                        prefetch_start_time = time.time()
+                        prefetch_failures = 0
+                        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} Prefetching →", target_url)
+                        # Don't start the fade yet - wait for successful prefetch
                 except Exception as e:
                     print(f"Prefetch failed: {e}")
                     traceback.print_exc()  # Print the error for debugging

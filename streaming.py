@@ -183,13 +183,20 @@ def resolve_playlist(url: str, timeout=5) -> str:
     Raises:
         RuntimeError: If no stream URL could be found
     """
+    # Validate URL first
+    if not url or not isinstance(url, str):
+        raise RuntimeError(f"Invalid URL provided: {url}")
+
     path = up.urlparse(url).path
     if path and '.' not in path.split('/')[-1]:
         return url  # already looks like /mount
 
     # Extract hostname for DNS cache
-    parsed_url = up.urlparse(url)
-    hostname = parsed_url.netloc.split(':')[0]
+    try:
+        parsed_url = up.urlparse(url)
+        hostname = parsed_url.netloc.split(':')[0] if parsed_url.netloc else None
+    except Exception as e:
+        raise RuntimeError(f"Failed to parse URL {url}: {str(e)}")
 
     # Check DNS resolution first (quick check)
     if hostname and not get_cached_dns(hostname):
@@ -317,6 +324,10 @@ def open_stream(url: str):
     Raises:
         Various exceptions if the stream cannot be opened
     """
+    # Validate URL first
+    if not url or not isinstance(url, str):
+        raise StreamConnectionError(f"Invalid URL provided: {url}")
+
     debug(f"Opening stream: {url}")
     # Set a timer to prevent blocking indefinitely
     start_time = time.time()
