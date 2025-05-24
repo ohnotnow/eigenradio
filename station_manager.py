@@ -1,17 +1,19 @@
 """
-Station management functionality for Eigenradio
+Station management for Eigenradio
+Handles loading, parsing, and selecting radio stations
 """
 
-import random
-import requests
-import xml.etree.ElementTree as ET
-import time
 import json
 import os
-from typing import List, Optional, Set, Dict, Tuple
+import random
+import time
+import xml.etree.ElementTree as ET
+from typing import List, Optional, Tuple, Set, Dict
+import requests
+from collections import defaultdict
 import concurrent.futures
 
-from config import debug
+from config import debug, log_info, log_debug, log_error
 
 # File to store station stats
 STATS_FILE = "station_stats.json"
@@ -59,13 +61,13 @@ def load_stats_from_disk():
 
 def save_stats_to_disk():
     """Save station stats to disk"""
-    print(f"Saving stats for {len(station_stats)} stations to {STATS_FILE}")
+    log_debug(f"Saving stats for {len(station_stats)} stations to {STATS_FILE}")
     try:
         with open(STATS_FILE, 'w', encoding='utf-8') as f:
             json.dump(station_stats, f, indent=2)
-        print(f"Saved stats for {len(station_stats)} stations to {STATS_FILE}")
+        log_debug(f"Saved stats for {len(station_stats)} stations to {STATS_FILE}")
     except IOError as e:
-        print(f"Error saving stats file: {str(e)}")
+        log_error(f"Error saving stats file: {str(e)}")
 
 def parse_m3u(file_path: str) -> List[str]:
     """Parse an M3U file and return a list of stream URLs"""

@@ -19,7 +19,7 @@ import signal
 import random
 
 # Import modules
-from config import set_debug, executor
+from config import set_debug, executor, log_info, log_debug, log_error
 from station_manager import parse_m3u, parse_icecast, get_random_station
 from audio_core import produce_pcm, radio_player, FRAME_SIZE
 from mixer import radio_mixer
@@ -42,28 +42,28 @@ def signal_handler(sig, frame):
     sigint_count += 1
 
     if sigint_count == 1:
-        print("\nShutting down gracefully... (Ctrl-C again to force quit)")
+        log_info("Shutting down gracefully... (Ctrl-C again to force quit)", include_timestamp=True)
         running = False
 
         # Set a timer to force exit if graceful shutdown takes too long
         def force_exit_timer():
             time.sleep(3.0)  # Give 3 seconds for graceful shutdown
             if not force_exit:
-                print("\nGraceful shutdown taking too long, forcing exit...")
+                log_info("Graceful shutdown taking too long, forcing exit...", include_timestamp=True)
                 os._exit(1)
 
         timer_thread = threading.Thread(target=force_exit_timer, daemon=True)
         timer_thread.start()
 
     elif sigint_count >= 2:
-        print("\nForce quitting...")
+        log_info("\nForce quitting...", include_timestamp=True)
         force_exit = True
         # Force exit immediately
         os._exit(1)
 
 def find_working_initial_station(stations, max_attempts=MAX_INITIAL_ATTEMPTS):
     """Find a working initial station or exit if none available"""
-    print(f"Finding initial station from {len(stations)} stations...")
+    log_info(f"Finding initial station from {len(stations)} stations...", include_timestamp=True)
 
     tried_stations = set()
     attempts = 0
@@ -73,13 +73,13 @@ def find_working_initial_station(stations, max_attempts=MAX_INITIAL_ATTEMPTS):
             # Try to get a random station that we haven't tried yet
             available_stations = [s for s in stations if s not in tried_stations]
             if not available_stations:
-                print(f"Tried all available stations ({len(tried_stations)}), none working!")
+                log_error(f"Tried all available stations ({len(tried_stations)}), none working!", include_timestamp=True)
                 return None
 
             url = random.choice(available_stations)
             tried_stations.add(url)
 
-            print(f"Trying initial station {attempts+1}/{max_attempts}: {url}")
+            log_debug(f"Trying initial station {attempts+1}/{max_attempts}: {url}", include_timestamp=True)
 
             # Use a shorter timeout for initial station checks to prevent hanging
             import signal
@@ -105,7 +105,7 @@ def find_working_initial_station(stations, max_attempts=MAX_INITIAL_ATTEMPTS):
             thread.join(timeout=8)  # 8 second timeout for initial station check
 
             if thread.is_alive():
-                print(f"Station connection timed out after 8 seconds: {url}")
+                log_debug(f"Station connection timed out after 8 seconds: {url}", include_timestamp=True)
                 # Thread is still running, but we'll continue to next station
                 attempts += 1
                 time.sleep(0.5)
@@ -113,20 +113,20 @@ def find_working_initial_station(stations, max_attempts=MAX_INITIAL_ATTEMPTS):
 
             if result[0]:
                 url, stream = result[0]
-                print(f"Found working initial station: {url}")
+                log_info(f"Found working initial station: {url}", include_timestamp=True)
                 return url, stream
             elif error[0]:
                 raise error[0]
 
         except (StreamConnectionError, StreamTimeoutError) as e:
-            print(f"Station connection failed: {e}")
+            log_debug(f"Station connection failed: {e}", include_timestamp=True)
         except Exception as e:
-            print(f"Unexpected error with station: {e}")
+            log_debug(f"Unexpected error with station: {e}", include_timestamp=True)
 
         attempts += 1
         time.sleep(0.5)  # Brief pause before next attempt
 
-    print(f"Failed to find a working station after {max_attempts} attempts.")
+    log_error(f"Failed to find a working station after {max_attempts} attempts.", include_timestamp=True)
     return None
 
 def main(args):
@@ -145,18 +145,18 @@ def main(args):
     # Check static file
     static_file = args.static_file
     if not os.path.isfile(static_file):
-        print(f"No static file found at {static_file}!")
+        log_error(f"No static file found at {static_file}!", include_timestamp=True)
         sys.exit(1)
 
     # Verify stations were loaded
     if not stations:
         if args.m3u_file:
-            print("No stations found in M3U file!")
+            log_error("No stations found in M3U file!", include_timestamp=True)
         else:
-            print("No stations found in Icecast file!")
+            log_error("No stations found in Icecast file!", include_timestamp=True)
         sys.exit(1)
 
-    print(f"Loaded {len(stations)} stations and static sound: {static_file}")
+    log_info(f"Loaded {len(stations)} stations and static sound: {static_file}", include_timestamp=True)
 
     # Decode static file
     static_pcm = ma.decode_file(static_file,
@@ -167,7 +167,7 @@ def main(args):
     # Find an initial working station
     result = find_working_initial_station(stations)
     if not result:
-        print("Could not find a working initial station. Exiting.")
+        log_error("Could not find a working initial station. Exiting.")
         sys.exit(1)
 
     initial_url, initial_stream = result
@@ -192,23 +192,23 @@ def main(args):
                            buffersize_msec=120)
     try:
         dev.start(player)
-        print("▲  Playing…  Ctrl-C to quit")
+        log_info("Ctrl-C to quit", include_timestamp=True)
 
         # Main loop with clean shutdown
         while running and not force_exit:
             time.sleep(0.1)
 
         # Graceful shutdown
-        print("Shutting down...")
+        log_info("Shutting down...", include_timestamp=True)
         time.sleep(0.5)  # Allow final audio to play
 
     except KeyboardInterrupt:
         # Handle any KeyboardInterrupt that wasn't caught by the signal handler
-        print("\nForce quitting...")
+        log_info("\nForce quitting...", include_timestamp=True)
 
     finally:
         # Ensure resources are cleaned up quickly
-        print("Shutting down...")
+        log_info("Shutting down...", include_timestamp=True)
 
         # Close audio device first
         try:
@@ -222,7 +222,7 @@ def main(args):
         except:
             pass
 
-        print("Goodbye!")
+        log_info("Goodbye!", include_timestamp=True)
 
 
 if __name__ == '__main__':
