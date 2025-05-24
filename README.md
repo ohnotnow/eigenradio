@@ -66,9 +66,9 @@ uv run main.py \
   --fade 5
 ```
 
-For a very quick idea of how it sounds (if you've grabbed the icecast xml file above):
+For a very quick idea of how it sounds (using the example m3u in the repo):
 ```
-uv run main.py --icecast-file icecast.xml --playtime=20
+uv run main.py --m3u-file example.m3u --playtime=20
 ```
 
 ## License
