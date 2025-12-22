@@ -1,5 +1,9 @@
 # Eigenradio
 
+**Note:** A much better rewrite of this project is at https://github.com/ohnotnow/eigen2
+
+---
+
 A command-line Internet radio player written in Python. Eigenradio parses M3U or Icecast XML playlists, randomly selects a working stream and crossfades between stations with static-noise filler as a faux 'retune the radio'.
 
 Named in memory of the MIT 'Eigenradio' site from years gone past.
